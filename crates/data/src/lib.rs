@@ -5,6 +5,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod address;
+pub mod citygml;
 pub mod cityjson;
 mod citymodel;
 pub mod color;
@@ -327,6 +328,18 @@ pub struct Dataset {
     /// so they aren't saved: the source is read again instead.
     #[serde(skip)]
     pub windowed: bool,
+}
+
+impl Dataset {
+    /// How many of its values a saved project holds as null, not as they are: numbers that aren't
+    /// finite (NaN, infinity), which JSON can't write ([`Value`]'s `Serialize`). None for a window
+    /// onto a source, whose rows aren't saved.
+    pub fn unsaved_numbers(&self) -> usize {
+        if self.windowed {
+            return 0;
+        }
+        self.features.iter().flat_map(|f| &f.attrs).filter(|v| v.is_non_finite()).count()
+    }
 }
 
 impl Serialize for Dataset {

@@ -239,13 +239,20 @@ pub struct GpkgEdit {
 }
 
 /// How a loaded row is told apart from the same row edited: a hash of its geometry and
-/// attributes (FNV-1a over their JSON, the same in every build).
+/// attributes (FNV-1a over their JSON, the same in every build). Non-finite attributes also
+/// contribute their position and native bits, since output JSON substitutes Null for them.
 pub fn row_hash(f: &rustgis_data::Feature) -> u64 {
     /// FNV-1a over the bytes written to it, kept as they come (no buffer per row).
     struct Fnv(u64);
+    impl Fnv {
+        /// Feeds bytes without buffering; also used for values JSON cannot distinguish.
+        fn bytes(&mut self, buf: &[u8]) {
+            self.0 = buf.iter().fold(self.0, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+        }
+    }
     impl std::io::Write for Fnv {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0 = buf.iter().fold(self.0, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+            self.bytes(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -256,6 +263,15 @@ pub fn row_hash(f: &rustgis_data::Feature) -> u64 {
     // As before, a row that can't be written hashes as no bytes.
     if serde_json::to_writer(&mut h, &(&f.geometry, &f.attrs)).is_err() {
         return 0xcbf2_9ce4_8422_2325;
+    }
+    for (index, value) in f.attrs.iter().enumerate() {
+        if let rustgis_data::Value::Float(number) = value
+            && !number.is_finite()
+        {
+            h.bytes(b"\xffnon-finite:");
+            h.bytes(&(index as u64).to_le_bytes());
+            h.bytes(&number.to_bits().to_le_bytes());
+        }
     }
     h.0
 }
@@ -522,7 +538,10 @@ fn open_postgis(pg: &PostgisOrigin) -> rustgis_data::Result<Box<dyn FeatureSourc
     {
         use rustgis_data::source::{duckdb::Database, postgis};
         let Database::Postgres(dsn) = Database::parse(&pg.database) else {
-            return Err(rustgis_data::DataError::Format(format!("{}: not a PostgreSQL connection", pg.database)));
+            return Err(rustgis_data::DataError::Format(rustgis_data::diagnostics::message_with_address(
+                &pg.database,
+                "not a PostgreSQL connection",
+            )));
         };
         let conn = postgis::connect(&dsn, false).map_err(database_open_error)?;
         let table = postgis::find_table(&conn, &pg.table)?;
@@ -542,7 +561,10 @@ fn open_mysql(my: &MysqlOrigin) -> rustgis_data::Result<Box<dyn FeatureSource>> 
     {
         use rustgis_data::source::{duckdb::Database, mysql};
         let Database::Mysql(address) = Database::parse(&my.database) else {
-            return Err(rustgis_data::DataError::Format(format!("{}: not a MySQL or MariaDB connection", my.database)));
+            return Err(rustgis_data::DataError::Format(rustgis_data::diagnostics::message_with_address(
+                &my.database,
+                "not a MySQL or MariaDB connection",
+            )));
         };
         let conn = mysql::connect(&address, false).map_err(database_open_error)?;
         let table = mysql::find_table(&conn, &my.table)?;
@@ -562,7 +584,10 @@ fn open_sqlserver(ms: &SqlServerOrigin) -> rustgis_data::Result<Box<dyn FeatureS
     {
         use rustgis_data::source::{duckdb::Database, sqlserver};
         let Database::Sqlserver(address) = Database::parse(&ms.database) else {
-            return Err(rustgis_data::DataError::Format(format!("{}: not a SQL Server connection", ms.database)));
+            return Err(rustgis_data::DataError::Format(rustgis_data::diagnostics::message_with_address(
+                &ms.database,
+                "not a SQL Server connection",
+            )));
         };
         let conn = sqlserver::connect(&address, false).map_err(database_open_error)?;
         let table = sqlserver::find_table(&conn, &ms.table)?;
@@ -738,18 +763,19 @@ impl SourceLayer {
                 }
             }
         }
+        let named = |e: &str| rustgis_data::diagnostics::message_with_address(path, e);
         if new.handle.is_none() {
-            new.open().map_err(|e| format!("{path}: {e}"))?;
+            new.open().map_err(|e| named(&e))?;
         }
         // Opening a header alone doesn't establish that its payload is readable. Probe the
         // candidate, never the live source, before the caller commits the replacement.
-        let handle = new.handle.as_deref().ok_or_else(|| format!("{path}: the replacement source didn't open"))?;
-        let probe = handle.read(&Request { extent: None, limit: 1 }).map_err(|e| format!("{path}: {e}"))?;
+        let handle = new.handle.as_deref().ok_or_else(|| named("the replacement source didn't open"))?;
+        let probe = handle.read(&Request { extent: None, limit: 1 }).map_err(|e| named(&e.to_string()))?;
         if probe.features.is_empty() && probe.skipped > 0 {
-            return Err(format!(
-                "{path}: no readable features found while checking the replacement ({} rows could not be read)",
+            return Err(named(&format!(
+                "no readable features found while checking the replacement ({} rows could not be read)",
                 probe.skipped
-            ));
+            )));
         }
         if probe.skipped > 0 {
             conversion_notes.push(format!("{} rows could not be read while checking the replacement", probe.skipped));
@@ -1044,9 +1070,11 @@ impl SourceLayer {
                     let r = match r {
                         Ok(bytes) => rustgis_data::source::open_shared(&name, Arc::new(bytes), table.as_deref())
                             .map(Arc::from)
-                            .map_err(|e| format!("{url}: {e}")),
-                        Err(rustgis_data::source::remote::Failed::Other(e)) => Err(format!("{url}: {e}")),
-                        Err(e) => Err(format!("{url}: couldn't be downloaded ({e:?})")),
+                            .map_err(|e| rustgis_data::diagnostics::message_with_address(&url, &e.to_string())),
+                        Err(rustgis_data::source::remote::Failed::Other(e)) => {
+                            Err(rustgis_data::diagnostics::message_with_address(&url, &e))
+                        }
+                        Err(e) => Err(rustgis_data::diagnostics::message_with_address(&url, &format!("couldn't be downloaded ({e:?})"))),
                     };
                     if let Ok(mut s) = land.lock() {
                         *s = Some(r);
@@ -1684,6 +1712,21 @@ mod tests {
         assert_eq!(super::row_hash(&f), fnv);
         // And the value itself: a change in how rows are written would show every saved row edited.
         assert_eq!(super::row_hash(&f), 8_547_063_913_914_077_080);
+    }
+
+    /// Clearing a non-finite source cell is a write-back update even though output JSON uses Null.
+    #[test]
+    fn clearing_nonfinite_source_values_is_a_row_update() {
+        use rustgis_data::{Feature, Value};
+        for number in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let loaded = Feature { id: 1, geometry: None, attrs: vec![Value::Float(number)] };
+            let versions: super::Versions = [(1, super::RowVersion { version: 7, hash: super::row_hash(&loaded) })].into_iter().collect();
+            assert!(versions.changes(std::slice::from_ref(&loaded)).is_empty());
+            let cleared = Feature { attrs: vec![Value::Null], ..loaded };
+            let changes = versions.changes(std::slice::from_ref(&cleared));
+            assert_eq!(changes.updates.iter().map(|(feature, version)| (feature.id, *version)).collect::<Vec<_>>(), [(1, 7)]);
+            assert_eq!(changes.updates[0].0.attrs, [Value::Null]);
+        }
     }
 
     #[test]

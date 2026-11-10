@@ -29,7 +29,7 @@ pub fn commands() -> Vec<C> {
             r#"{"name"?: string, "page"?: "letter"|"legal"|"tabloid"|"a5"|"a4"|"a3"|"a2"|"a1"|"a0", "orientation"?: "landscape"|"portrait", "width"?: mm, "height"?: mm, "template"?: "map" (frame, title, legend, north arrow, scale bar; the default)|"blank"}"#,
         ),
         C::new("layout.publication", "New Publication Layout", "Publish › Layout", publication).inputs(publication_inputs).roles(&[]).effects(crate::policy::Effects::NONE).params(
-            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite and each arrangement by name laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
+            r#"{"profile"?: "a4" (the default) | "a3" | "a2" (a sheet turned to portrait or landscape, whichever the area's map comes out larger on: its extent east to west against north to south, on the map's projection) | "a4-portrait"|"a4-landscape"|"a3-portrait"|"a3-landscape"|"a2-portrait"|"a2-landscape" (a sheet: frame, title, subtitle, the map, a boxed footer)|"figure-1col" (90 mm)|"figure-1.5col" (140 mm)|"figure-2col" (190 mm)|"thesis-full" (160 × 225 mm)|"thesis-half" (160 × 110 mm) (a figure: the map edge to edge, its title and sources left to the caption), "extent"?: [west, south, east, north] in degrees that must fit (default: the map view), "name"?: string, "title"?: text, "subtitle"?: text, "sources"?: text | [texts], "reference"?: text | [texts] (default: the projection, datum and graticule), "note"?: text, "author"?: text (default: "Made with RustGIS · {date}"; "" or [] for none), "headings"?: [the sources' heading, the reference's heading, an editorial column's heading], "locator"?: "globe" (a globe with the area outlined; the default on sheets) | "inset" (the surrounding region, the area outlined) | "none" (the default on figures), "decimal"?: "." (the default) | "," (graticule, scale bar and colorbar numbers and {scale} with a decimal comma: 0,05 and 1:6.300.000), "colorbar"?: "auto" (the default: the top visible raster with a colour scale gets one, under the legend in its box) | "none" (no colorbar, and the legend's box has no room for one), "style"?: "classic" (the default: the title over the map, the footer under it) | "banner" (the title and subtitle in a band of the accent colour across the top) | "panel" (the map at the left, a panel at the right with the title, locator, legend, sources and reference) | "editorial" (the title large in serif, a column at the right with the note, the locator and the legend) | "modular" (cards on a light page: the map, the locator and the legend each in one, the sources and reference in tinted ones) | "poster" (the page in the accent colour, the title in light text, the map in a light card, the footer in darker blocks) (a sheet's arrangement; figures leave it to the caption), "accent"?: a colour as #RRGGBB (the style's colour: its band, panel tint, headings and rules, a poster's page), "arrangement"?: "best" (the default: the favourite and each arrangement by name laid out, the one moving the least area off its corners kept, then the one leaving the least over the data, the favourite on a tie) | "favourite" (layout.arrangement's) | an arrangement by name or corner by corner, as layout.arrangement takes (the corners the locator, north arrow, legend and scale bar are at home in; one covering what the map draws there still moves)} → a new layout of the active map at a round scale, its texts wrapped to their boxes; {projection}, {datum} and {grid} in the texts are filled from the map"#,
         ),
         C::new("layout.arrangement", "Favourite Arrangement", "Publish › Layout", arrangement).roles(&[]).effects(crate::policy::Effects::NONE).view().params(
             r#"{"favourite"?: "classic" (the locator top left, the north arrow top right, the legend bottom left, the scale bar bottom right) | "mirrored" | "legendRight" | "legendTop" | {"locator", "northArrow", "legend", "scaleBar": "top-left"|"top-right"|"bottom-left"|"bottom-right", each a corner of its own}} → the favourite arrangement of publication layouts (kept with the app's preferences), its corners and the arrangements by name; with no favourite given, it is only shown"#,
@@ -943,6 +943,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let headings = texts_of(p, "headings")?.unwrap_or_default();
     let comma = decimal_mark(p)?.unwrap_or(false);
     let locator = publication_locator(p, sheet)?;
+    let colorbar = publication_colorbar(p)?;
     // A style or an accent that isn't text is refused, as an unknown one is, rather than left out.
     for k in ["style", "accent"] {
         if p.get(k).is_some_and(|v| !v.is_null() && !v.is_string()) {
@@ -1789,8 +1790,9 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     surrounds.push((Surround::Arrow, aw, ah));
     // The topmost visible raster drawn on a ramp gets a colorbar, under the legend in its box (a
     // map whose theme is a raster has its key there, which the legend's rows don't give).
+    // `"colorbar": "none"` leaves it out, and its room in the box with it (#1680).
     let bar = rustgis_map::layout::colorbar_layer(s.map(), None)
-        .filter(|l| l.raster.as_ref().and_then(rustgis_map::layout::color_scale).is_some())
+        .filter(|l| colorbar && l.raster.as_ref().and_then(rustgis_map::layout::color_scale).is_some())
         .map(|l| l.name.clone());
     let (bar_w, bar_h) = (if sheet { 50.0 * k } else { 40.0 }, COLORBAR_MM);
     let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
@@ -3513,7 +3515,20 @@ pub fn layout_bytes(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool) 
 }
 
 /// [`layout_bytes`], a PDF's map frames georeferenced only when `georeference` (#1191).
+/// Returns an actionable error if a linked archive changes while the pages are drawn.
 pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    let revisions = rustgis_render::layout::archive_revisions(layout, &s.project.maps);
+    let result = layout_bytes_inner(s, li, pdf, dpi, all, georeference);
+    let layout = s.project.layouts.get(li).ok_or("no layout")?;
+    revisions.finish_revision(
+        rustgis_render::layout::archive_revisions(layout, &s.project.maps),
+        Some(result),
+        "could not draw the page",
+    )?
+}
+
+fn layout_bytes_inner(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: bool, georeference: bool) -> Result<Vec<u8>, String> {
     let saved = s.project.layouts.get(li).ok_or("no layout")?.clone();
     if let Some(note) = named_fonts_unread(&saved) {
         s.warn(note);
@@ -3574,13 +3589,11 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
                 };
                 left_out.extend(geo.left_out.into_iter().map(|(id, n, why)| (page + 1, id, n, why)));
                 by_corners.extend(geo.by_corners.into_iter().map(|(id, n)| (page + 1, id, n)));
-                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)
-                    .ok_or("the page is too large to draw")?;
+                let (drawing, pictured) = rustgis_render::layout::render_drawing(layout, &mut s.project.maps, dpi, &info)?;
                 if drawing.overflowed() {
                     pages_pictured.push(page + 1);
                     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-                    let img =
-                        rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                    let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
                     out.push(rustgis_render::pdf::Page::new(&img, w, h).with_viewports(geo.viewports));
                 } else {
                     frames_pictured.extend(pictured);
@@ -3595,7 +3608,7 @@ pub fn layout_bytes_with(s: &mut Session, li: usize, pdf: bool, dpi: f64, all: b
                     ));
                 }
             } else {
-                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info).ok_or("the page is too large to draw")?;
+                let img = rustgis_render::layout::render(layout, &mut s.project.maps, dpi, &info)?;
                 png = Some(img.encode_png().map_err(|e| e.to_string())?);
             }
             // A cancelled export stops here, its layout put back below.
@@ -3756,17 +3769,8 @@ pub(crate) fn export_work(s: &Session, p: &Value) -> Result<super::exports::Work
             Ok(json!({"path": path, "bytes": bytes.len()}))
         })();
         // What drawing it said (frames drawn as pictures, fonts it lacks), as the command says it
-        // here; past the notices a session keeps, how many earlier ones there were.
-        let kept = std::mem::take(&mut copy.notices);
-        let earlier = copy.notices_given().saturating_sub(kept.len() as u64);
-        let mut said: Vec<_> = Vec::new();
-        if earlier > 0 {
-            said.push((
-                rustgis_data::diagnostics::Severity::Warning,
-                format!("{path}: {earlier} earlier notices from drawing it aren't shown"),
-            ));
-        }
-        said.extend(kept.into_iter().map(|n| (n.severity, n.text)));
+        // here.
+        let said = super::exports::copy_notices(&mut copy, &path);
         super::exports::drawn(&copy.project.maps, said, written, path)
     }))
 }
@@ -3784,8 +3788,7 @@ fn layout_svg(s: &mut Session, li: usize, dpi: f64) -> Result<String, String> {
     };
     // Rendering borrows the current layout; it does not step or modify the series page.
     let layout = s.project.layouts.get(li).ok_or("no layout")?;
-    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)
-        .ok_or("could not draw the page; check its map sources and export size")?;
+    let (text, pictured) = rustgis_render::svg::layout_svg(layout, &mut s.project.maps, dpi, &info)?;
     pictured_notices(s, &pictured, &[]);
     Ok(text)
 }
@@ -3997,6 +4000,19 @@ fn locator_orphan(input: &impl super::InputSource) -> Option<usize> {
         x.tiles.is_empty() && x.layers.iter().all(|l| l.geometry_type() == rustgis_data::GeometryType::Polygon && !l.labels.enabled)
     };
     s.project.maps.iter().position(|x| x.projection.is_globe() && ours(&x.name) && !shown(&x.name) && x.name != src.name && made_here(x))
+}
+
+/// Whether the publication gives the top visible raster a colorbar: `"auto"` (the default) or
+/// `"none"`.
+fn publication_colorbar(p: &Value) -> Result<bool, String> {
+    match p.get("colorbar").filter(|v| !v.is_null()) {
+        None => Ok(true),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some("auto") => Ok(true),
+            Some("none") => Ok(false),
+            _ => Err("colorbar is \"auto\" or \"none\"".into()),
+        },
+    }
 }
 
 /// Parses the publication's locator choice with the sheet-specific default.

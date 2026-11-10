@@ -1760,9 +1760,20 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, moves: [bool; 2], reord
             action = Some(("ui.exportRaster", json!({"tiles": i})));
             ui.close();
         }
-        if tile.archive_file().is_some() && ui.button(tl!("Repair Data Source…")).clicked() {
-            action = Some(("ui.dialog", json!({"name": "repairTiles", "index": i})));
-            ui.close();
+        #[cfg(not(target_arch = "wasm32"))]
+        if tile.archive_file().is_some() {
+            if ui
+                .button(tl!("Reload Data"))
+                .on_hover_text(tl!("Manually reread this archive from disk without changing its presentation. Undo cannot restore overwritten file contents."))
+                .clicked()
+            {
+                action = Some(("map.reloadTiles", json!({"index": i})));
+                ui.close();
+            }
+            if ui.button(tl!("Repair Data Source…")).clicked() {
+                action = Some(("ui.dialog", json!({"name": "repairTiles", "index": i})));
+                ui.close();
+            }
         }
         if ui.button(tl!("Remove")).clicked() {
             action = Some(("map.removeTiles", json!({"index": i})));
@@ -2249,7 +2260,7 @@ fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
     if !l.is_raster()
         && ui.button(tl!("Convert To Annotation")).on_hover_text(tl!("Convert this layer's labels into an annotation layer.")).clicked()
     {
-        if let Err(e) = app.run("labels.convert", json!({"layer": l.id})) {
+        if let Err(e) = app.run_by_user("labels.convert", json!({"layer": l.id})) {
             app.session.notify(e, true);
         }
         ui.close();
@@ -6161,7 +6172,7 @@ fn line_strokes_editor(app: &mut RustGisApp, ui: &mut Ui, l: &rustgis_engine::ma
 // History and Details
 
 pub(crate) fn history(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
-    if crate::sessionlog::tabs(app, ui) {
+    if crate::sessionlog::tabs(app, ui, t) {
         return crate::sessionlog::pane(app, ui, t);
     }
     let hist = app.session.project.gp_history.clone();

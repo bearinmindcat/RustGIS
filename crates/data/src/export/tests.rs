@@ -164,12 +164,46 @@ fn a_streamed_export_writes_what_a_whole_export_writes() {
                 let what = format!("{format} to .{ext} in {}", crs.label());
                 let unfit = streamed.unfit.clone();
                 assert!(unfit.iter().all(|n| *n == 0), "{what}: {unfit:?}");
-                let expected = Exported { written: whole.features.len() - left_out, left_out, skipped: 0, unfit, beyond_web_mercator: 0 };
+                let expected = Exported {
+                    written: whole.features.len() - left_out,
+                    left_out,
+                    skipped: 0,
+                    null_numbers: 0,
+                    unfit,
+                    beyond_web_mercator: 0,
+                };
                 assert_eq!(streamed, expected, "{what}");
                 let (a, b) = (read_back(&a), read_back(&b));
                 assert_eq!((&a.fields, a.geometry_type, a.crs), (&b.fields, b.geometry_type, b.crs), "{what}");
                 assert_eq!(a.features, b.features, "{what}");
                 assert!(!a.features.is_empty(), "{what}");
+            }
+        }
+    }
+}
+
+/// Every chunk contributes to the loss count; a finite export remains quiet.
+#[test]
+fn nonfinite_numbers_are_counted_across_export_chunks() {
+    let d = folder("nonfinite");
+    for ext in ["geojson", "gpkg"] {
+        for lossy in [false, true] {
+            let mut ds = squares();
+            if lossy {
+                ds.features[0].attrs[2] = Value::Float(f64::NAN);
+                ds.features[1].attrs[2] = Value::Float(f64::INFINITY);
+            }
+            let src = Runs::new(&ds, 1);
+            let out = d.join(format!("numbers-{lossy}.{ext}"));
+            let exported = write_chunks_in(&src, &ds, &out, Crs::LonLat, 2048).unwrap();
+            assert_eq!(exported.null_numbers, if lossy { 2 } else { 0 });
+            let read = read_back(&out);
+            let share = read.field_index("share").unwrap();
+            if lossy {
+                assert_eq!(read.features[0].attrs[share], Value::Null);
+                assert_eq!(read.features[1].attrs[share], Value::Null);
+            } else {
+                assert_eq!(read.features[0].attrs[share], ds.features[0].attrs[2]);
             }
         }
     }
@@ -478,7 +512,8 @@ fn a_typeless_layer_exports_the_same_geopackage_streamed_or_whole() {
         assert_eq!(crate::io::write_path(&ds, &b).unwrap(), 0);
         assert_eq!((kind(&a), kind(&b)), (want.to_string(), want.to_string()));
         assert_eq!(read_back(&a).features, read_back(&b).features);
-        assert_eq!(read_back(&a).features.len(), 300);
+        // Every square and the feature without geometry, which a GeoPackage keeps.
+        assert_eq!(read_back(&a).features.len(), 301);
     }
 }
 
@@ -501,7 +536,8 @@ fn a_projected_streamed_geopackage_of_a_mixed_layer_keeps_every_kind() {
     assert_eq!((streamed.left_out, streamed.written), (0, 301));
     assert_eq!(crate::io::write_path_in(&mixed, &b, utm).unwrap(), 0);
     assert_eq!(read_back(&a).features, read_back(&b).features);
-    assert_eq!(read_back(&a).features.len(), 300);
+    // Every feature, the one without geometry included.
+    assert_eq!(read_back(&a).features.len(), 301);
 }
 
 /// A mixed layer added as a table to an existing GeoPackage, streamed or whole, gets a GEOMETRY
