@@ -1162,10 +1162,14 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         ))
     };
     let proj = match method {
+        "TRANSVERSE_MERCATOR" | "GAUSS_KRUGER" => format!("+proj=tmerc +lat_0={lat0} +k_0={k0} {at}"),
         // South Orientated (EPSG's method 9808, South Africa's Lo grids) counts westings and
-        // southings: the same projection, given `+axis=wsu` below.
-        "TRANSVERSE_MERCATOR" | "GAUSS_KRUGER" | "TRANSVERSE_MERCATOR_SOUTH_ORIENTATED" => {
-            format!("+proj=tmerc +lat_0={lat0} +k_0={k0} {at}")
+        // southings: the same projection, given `+axis=wsu` below. Its false easting and northing
+        // add to the westing and southing at the natural origin (EPSG Guidance Note 7-2: a false
+        // westing and southing), and `+axis=wsu` negates what `+x_0` and `+y_0` give, so they go
+        // in negated (`0.0 -` keeps a zero one from reading `-0`).
+        "TRANSVERSE_MERCATOR_SOUTH_ORIENTATED" => {
+            format!("+proj=tmerc +lat_0={lat0} +k_0={k0} +lon_0={lon0} +x_0={} +y_0={}", 0.0 - x0, 0.0 - y0)
         }
         // proj4rs supports the Swiss special case and, since 0.3, the azimuth forms in general;
         // the two-point one (no AZIMUTH) isn't supported. The Swiss system is the azimuth-90°
@@ -2596,6 +2600,22 @@ pub(crate) mod tests {
         // The scale factor under EPSG's name, as GDAL writes this method in Esri WKT, is read.
         let scaled = ESRI.replace(r#""Scale factor at natural origin",1.0"#, r#""Scale factor at natural origin",0.9999"#);
         assert!(proj4(&scaled).unwrap().contains("+k_0=0.9999 "), "{scaled}");
+        // The false easting and northing add to the westing and southing at the natural origin
+        // (EPSG's method 9808: a false westing and southing). With 1000 m and 2000 m, the origin,
+        // 19°E on the equator, is at 1000 m, 2000 m, and the point 1000 m and 2000 m further on.
+        // (PROJ 9.8.1 refuses this method with offsets other than 0.)
+        let offset = GDAL
+            .replace(r#""false_easting",0]"#, r#""false_easting",1000]"#)
+            .replace(r#""false_northing",0]"#, r#""false_northing",2000]"#);
+        assert!(offset.contains(r#""false_easting",1000]"#) && offset.contains(r#""false_northing",2000]"#), "{offset}");
+        let t = crs_from_wkt(&offset).unwrap().transformer().unwrap();
+        for (what, at, ll) in [
+            ("the natural origin", Coord::new(1000.0, 2000.0), Coord::new(19.0, 0.0)),
+            ("the point", Coord::new(xy.x + 1000.0, xy.y + 2000.0), lonlat),
+        ] {
+            let got = t.to_lonlat(at).unwrap();
+            assert!(metres_apart(got, ll) < 0.001, "{what}: {got:?} is {} m off", metres_apart(got, ll));
+        }
     }
 
     #[test]
