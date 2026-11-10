@@ -109,6 +109,14 @@ impl Node {
             })
             .collect()
     }
+
+    /// The first number among the node's values, to change.
+    fn num_mut(&mut self) -> Option<&mut f64> {
+        self.items.iter_mut().find_map(|i| match i {
+            Item::Num(v) => Some(v),
+            _ => None,
+        })
+    }
 }
 
 struct Parser<'a> {
@@ -474,24 +482,29 @@ fn wkt1(n: Node, depth: usize) -> Result<Node, String> {
     }
 }
 
-/// A WKT1 projected system with its angular parameters in degrees, as [`projected2`] gives a WKT2
-/// one. WKT1 gives them in its `GEOGCS`'s angle unit: NTF (Paris) / Lambert zone II, as GDAL and
-/// Esri write it, has its latitude of origin at 52 grads, which is 46.8°. The prime meridian is
-/// left as it is, in degrees, as GDAL and Esri write it whatever the unit. A system in degrees is
-/// unchanged.
+/// The Paris meridian in degrees as GDAL and Esri write it (EPSG's 2.5969213 grads).
+const PARIS_IN_DEGREES: f64 = 2.337_229_17;
+
+/// A WKT1 projected system with its angles in degrees, as [`projected2`] gives a WKT2 one. WKT1
+/// gives its projection's angular parameters and its prime meridian in its `GEOGCS`'s angle unit:
+/// NTF (Paris) / Lambert zone II has its latitude of origin at 52 grads, which is 46.8°. GDAL and
+/// Esri write the Paris meridian in degrees all the same (2.33722917 beside grads), and that is
+/// kept, as PROJ keeps it. A system in degrees is unchanged.
 fn projected1(mut p: Node) -> Node {
     let f = factor(p.child("GEOGCS").and_then(|g| g.child("UNIT")));
+    let paris_in_degrees = |pm: &Node| norm(pm.title()) == "PARIS" && pm.num(0).is_some_and(|v| (v - PARIS_IN_DEGREES).abs() < 1e-7);
+    if let Some(pm) = p.child_mut("GEOGCS").and_then(|g| g.child_mut("PRIMEM"))
+        && !paris_in_degrees(pm)
+        && let Some(v) = pm.num_mut()
+    {
+        *v = convert(*v, f, 1f64.to_radians());
+    }
     let angles = p.items.iter_mut().filter_map(|i| match i {
         Item::Node(n) if n.name.eq_ignore_ascii_case("PARAMETER") && angular(&norm(n.title())) => Some(n),
         _ => None,
     });
-    for param in angles {
-        if let Some(v) = param.items.iter_mut().find_map(|i| match i {
-            Item::Num(v) => Some(v),
-            _ => None,
-        }) {
-            *v = convert(*v, f, 1f64.to_radians());
-        }
+    for v in angles.filter_map(Node::num_mut) {
+        *v = convert(*v, f, 1f64.to_radians());
     }
     p
 }
@@ -2579,11 +2592,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// A WKT1 projection's angular parameters are in its geographic system's unit, and its prime
-    /// meridian in degrees: NTF (Paris) / Lambert zone II, in grads, as PROJ 9.8.1 writes it in
-    /// WKT1 (GDAL's) and Esri WKT, without its code, places a point where PROJ does, as its WKT2
-    /// form does. Read as degrees, its latitude of origin of 52 grads put the point 578 km north
-    /// (#1692).
+    /// A WKT1 projection's angles are in its geographic system's unit: NTF (Paris) / Lambert zone
+    /// II, in grads, as PROJ 9.8.1 writes it in WKT1 (GDAL's) and Esri WKT, without its code,
+    /// places a point where PROJ does, as its WKT2 form does. Read as degrees, its latitude of
+    /// origin of 52 grads put the point 578 km north (#1692).
     #[test]
     fn wkt1_angles_are_in_the_geographic_systems_unit() {
         const GDAL: &str = r#"PROJCS["NTF (Paris) / Lambert zone II",GEOGCS["NTF (Paris)",DATUM["Nouvelle_Triangulation_Francaise_Paris",SPHEROID["Clarke 1880 (IGN)",6378249.2,293.466021293627,AUTHORITY["EPSG","7011"]],AUTHORITY["EPSG","6807"]],PRIMEM["Paris",2.33722917,AUTHORITY["EPSG","8903"]],UNIT["grad",0.0157079632679489,AUTHORITY["EPSG","9105"]],AUTHORITY["EPSG","4807"]],PROJECTION["Lambert_Conformal_Conic_1SP"],PARAMETER["latitude_of_origin",52],PARAMETER["central_meridian",0],PARAMETER["scale_factor",0.99987742],PARAMETER["false_easting",600000],PARAMETER["false_northing",2200000],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
@@ -2593,10 +2605,24 @@ pub(crate) mod tests {
         // PROJ 9.8.1's position on NTF itself (EPSG:4275, from Greenwich): these systems have no
         // shift to WGS 84 here, so RustGIS reads them on NTF.
         let ntf = Coord::new(1.680_720_205, 46.735_054_487);
-        for (what, wkt) in [("WKT1", GDAL), ("Esri", ESRI), ("WKT2", WKT2)] {
+        // The prime meridian is in that unit too, as PROJ reads it, but for Paris at 2.33722917,
+        // the degrees GDAL and Esri write: Paris in grads (2.5969213, as WKT1 defines it) is the
+        // same place, and another meridian at 2.33722917 is 2.33722917 grads, 0.233722917° west
+        // of Paris.
+        let paris_in_grads = GDAL.replace(r#"PRIMEM["Paris",2.33722917"#, r#"PRIMEM["Paris",2.5969213"#);
+        let another = GDAL.replace(r#"PRIMEM["Paris""#, r#"PRIMEM["Another""#);
+        let west = Coord::new(1.446_997_288, 46.735_054_487);
+        let cases = [
+            ("WKT1", GDAL, ntf),
+            ("Esri", ESRI, ntf),
+            ("WKT2", WKT2, ntf),
+            ("Paris in grads", &paris_in_grads, ntf),
+            ("another", &another, west),
+        ];
+        for (what, wkt, at) in cases {
             let crs = crs_from_wkt(wkt).unwrap_or_else(|e| panic!("{what}: {e}"));
             let ll = crs.transformer().unwrap().to_lonlat(xy).unwrap();
-            assert!(metres_apart(ll, ntf) < 0.01, "{what}: {ll:?} is {} m off", metres_apart(ll, ntf));
+            assert!(metres_apart(ll, at) < 0.01, "{what}: {ll:?} is {} m off", metres_apart(ll, at));
         }
         // A system in degrees keeps its parameters as written.
         let degrees = GDAL.replace(r#"UNIT["grad",0.0157079632679489"#, r#"UNIT["degree",0.0174532925199433"#);

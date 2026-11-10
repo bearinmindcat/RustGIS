@@ -117,8 +117,9 @@ or other WKT:
   refused where they can't be (Web Mercator, Krovak, sinusoidal, or such axes declared northing
   first, as in Austria's Ferro grids).
 - A WKT1 or Esri projection's angles (its latitude of origin, central meridian, standard
-  parallels, azimuth) are in its geographic system's unit, such as grads for NTF (Paris)'s
-  Lambert zones; its prime meridian is in degrees, as GDAL and Esri write it.
+  parallels, azimuth) and its prime meridian are in its geographic system's unit, such as grads
+  for NTF (Paris)'s Lambert zones, as PROJ reads them. The Paris meridian written as 2.33722917,
+  in degrees as GDAL and Esri write it whatever the unit, is read in degrees.
 
 RDN2008 and IGM95 are treated as WGS 84-like datums. These transformations do not replace
 regional grid corrections for survey accuracy. An unrecognized datum keeps its ellipsoid and
