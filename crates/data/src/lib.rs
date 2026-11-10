@@ -481,19 +481,33 @@ pub fn export_notes<'a>(
 
 /// What an export in Web Mercator says of the layers it writes past 85.05° north or south, where
 /// Web Mercator ends: [`rustgis_geom::lonlat_to_merc`] writes a latitude beyond (an infinite one
-/// too) at 85.05°. The vertices moved are counted from a layer's features; for a layer whose
-/// features are only a window onto its source, or a streamed layer's whole source, its extent
-/// tells instead, without a count. A missing coordinate, or an infinite longitude, isn't counted:
-/// it can't be projected, so the export refuses it.
+/// too) at 85.05°. The vertices moved are counted from a layer's features, those the file holds:
+/// a Shapefile target (`.shp`, or zipped to `.zip`, as the exports name it) holds only geometry of
+/// the layer's kind, and of it only parts it can draw ([`io::shapefile_vertices`]). A missing
+/// coordinate, or an infinite longitude, isn't counted: it can't be projected, so the export
+/// refuses it. A layer whose features are only a window onto its source, or a streamed layer
+/// written a chunk at a time (which comes with no features), has its extent tell instead, without
+/// a count; as a source can declare a wider extent than its data's, that notice says only that
+/// the extent reaches beyond. The count is one pass over the coordinates, without a Cancel point,
+/// as the other notices' passes are.
 fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) -> Option<String> {
     use rustgis_geom::MAX_LAT;
+    let shapefile = std::path::Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("shp") || e.eq_ignore_ascii_case("zip"));
     let beyond: Vec<(&str, Option<usize>)> = layers
         .iter()
         .filter_map(|(ds, e)| {
             let mut moved = 0usize;
             if !ds.windowed {
+                let mut count = |c: Coord| moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT);
                 for g in ds.features.iter().filter_map(|f| f.geometry.as_ref()) {
-                    g.for_each_coord(|c| moved += usize::from(c.x.is_finite() && c.y.abs() > MAX_LAT));
+                    if shapefile {
+                        crate::io::shapefile_vertices(g, ds.geometry_type, &mut count);
+                    } else {
+                        g.for_each_coord(&mut count);
+                    }
                 }
             }
             let past = !e.is_empty() && (e.min_y < -MAX_LAT || e.max_y > MAX_LAT);
@@ -502,15 +516,17 @@ fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) 
         .collect();
     let total: Option<usize> = beyond.iter().map(|(_, n)| *n).sum();
     let names: Vec<&str> = beyond.iter().map(|(name, _)| *name).collect();
-    let what = match (names.as_slice(), total) {
+    let said = match (names.as_slice(), total) {
         ([], _) => return None,
-        (_, Some(1)) => format!("1 vertex of {} is", names.join(", ")),
-        ([one], Some(n)) => format!("{n} vertices of {one} are"),
-        ([one], None) => format!("the parts of {one} are"),
-        (_, Some(n)) => format!("{n} vertices of {} are", layer_list(&names)),
-        (_, None) => format!("the parts of {} are", layer_list(&names)),
+        (_, Some(1)) => format!("1 vertex of {} is beyond 85.05° north or south, and written at 85.05°", names.join(", ")),
+        ([one], Some(n)) => format!("{n} vertices of {one} are beyond 85.05° north or south, and written at 85.05°"),
+        (_, Some(n)) => format!("{n} vertices of {} are beyond 85.05° north or south, and written at 85.05°", layer_list(&names)),
+        ([one], None) => format!("the extent of {one} reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°"),
+        (_, None) => {
+            format!("the extents of {} reach beyond 85.05° north or south, and what lies beyond is written at 85.05°", layer_list(&names))
+        }
     };
-    Some(format!("{target}: {what} beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"))
+    Some(format!("{target}: {said}, where Web Mercator ends"))
 }
 
 /// Why exporting `ds` in `crs` would write other data than the layer's: a layer on another body

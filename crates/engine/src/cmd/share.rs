@@ -633,8 +633,11 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit)
         }
     };
-    // A streamed layer's extent is its whole source's.
-    let notes = rustgis_data::export_notes([(ds, l.extent())], path, crs);
+    // The features written give their own extent. A streamed layer written a chunk at a time has
+    // none at hand, and its whole source's extent tells instead. (A raster layer's extent is its
+    // raster's, which the file doesn't hold.)
+    let extent = if chunks.is_some() { l.extent() } else { ds.extent() };
+    let notes = rustgis_data::export_notes([(ds, extent)], path, crs);
     // A Shapefile (`.shp`, or zipped to `.zip`) cuts field names to dBase's.
     let shapefile = matches!(ext.as_str(), "shp" | "zip");
     let mut dbf_notes = Vec::new();

@@ -33316,6 +33316,44 @@ fn web_mercator_exports_say_what_they_write_at_85_degrees() {
     assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
     let back = s.run("layer.addData", &json!({"path": lonlat})).unwrap()["layer"].as_u64().unwrap() as u32;
     assert!((south(&s, back) - source_south).abs() < 1e-6, "{} for {source_south}", south(&s, back));
+    // A raster layer reaching the poles writes no vertices: nothing is said of 85.05°.
+    let world_tif = {
+        use base64::Engine;
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+        let gt = GeoTransform { origin_x: -180.0, origin_y: 90.0, pixel_width: 45.0, pixel_height: -45.0 };
+        let bands = (0..3).map(|b| (0..32).map(|i| ((i * 7 + b * 40) % 256) as f32).collect()).collect();
+        let r = Raster::new("globe", 8, 4, bands, gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "UInt8").unwrap();
+        base64::engine::general_purpose::STANDARD.encode(geotiff::write(&r, 0).unwrap())
+    };
+    let globe = s.run("layer.addDataBytes", &json!({"fileName": "globe.tif", "data": world_tif})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.map().layer(globe as u32).unwrap().is_raster());
+    let mark = s.notice_mark();
+    let out = dir.join("globe.gpkg").display().to_string();
+    let _ = s.run("share.exportLayer", &json!({"layer": globe, "path": out, "crs": "EPSG:3857"}));
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // Streamed, the countries exported a chunk at a time (to a GeoPackage) have their source's
+    // extent tell, without a count; read whole (for a Shapefile), they're counted.
+    let gpkg = dir.join("countries.gpkg").display().to_string();
+    s.run("share.exportLayer", &json!({"layer": "Countries", "path": gpkg, "crs": "EPSG:4326"})).unwrap();
+    s.run("layer.addData", &json!({"path": gpkg, "stream": true, "name": "Streamed"})).unwrap();
+    for (file, notice) in [
+        (
+            "streamed.gpkg",
+            "the extent of Streamed reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°, where Web Mercator ends"
+                .to_string(),
+        ),
+        (
+            "streamed.shp",
+            format!("{beyond} vertices of Streamed are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"),
+        ),
+    ] {
+        let out = dir.join(file).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": "Streamed", "path": out, "crs": "EPSG:3857"})).unwrap();
+        assert_eq!(said(&s, mark), [format!("{out}: {notice}")], "{:?}", s.notices_since(mark));
+    }
+    // The streamed layer holds its GeoPackage open (Windows won't delete it till it's closed).
+    drop(s);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
