@@ -270,13 +270,12 @@ pub fn read_wkt(text: &str) -> Result<(Crs, Option<String>), String> {
 /// says whose it is (`the file's`).
 fn dropped_note(root: &Node, whose: &str) -> Option<String> {
     let datum = geogcs(root).and_then(|g| g.child("DATUM"));
-    unapplied(datum).map(|what| format!("{whose} {} isn't applied, so positions may be off by as much as that shift", clip(&what))).or_else(
-        || {
-            untransformed(datum).map(|to| {
-                format!("{whose} bound coordinate system has no transformation to {}, so it is read as its source system", clip(&to))
-            })
-        },
-    )
+    // On the source's datum, or on the source itself when it has none ([`put_mark`]).
+    if let Some(what) = unapplied(datum).or_else(|| mark(Some(root), UNAPPLIED)) {
+        return Some(format!("{whose} {} isn't applied, so positions may be off by as much as that shift", clip(&what)));
+    }
+    let to = untransformed(datum).or_else(|| mark(Some(root), UNTRANSFORMED))?;
+    Some(format!("{whose} bound coordinate system has no transformation to {}, so it is read as its source system", clip(&to)))
 }
 
 /// What [`read_wkt`] would say of a shift WKT `text` gives but RustGIS can't apply, for a system
@@ -748,7 +747,8 @@ const FRAME_METHODS: [u32; 8] = [9607, 1032, 1056, 1057, 1066, 1133, 1140, 1149]
 /// file) can't be applied: the source is read without it, which [`read_wkt`] says ([`UNAPPLIED`]).
 /// One without a transformation, which ISO 19162 requires and PROJ refuses, is read as its source
 /// too, which [`read_wkt`] says ([`UNTRANSFORMED`]): refused, a Shapefile's `.prj` would leave its
-/// data read as longitude/latitude, far off for a projected source.
+/// data read as longitude/latitude, far off for a projected source. In either case a source
+/// without a datum is read as it is, the mark on the source itself ([`put_mark`]).
 fn bound(b: Node, depth: usize) -> Result<Node, String> {
     let (mut source, mut target, mut transformation) = (None, None, None);
     for n in b.into_nodes() {
@@ -763,8 +763,7 @@ fn bound(b: Node, depth: usize) -> Result<Node, String> {
     let mut crs = wkt1(source.ok_or("the bound coordinate system has no source")?, depth + 1)?;
     let to = target.as_ref().map(|t| t.title().trim()).filter(|t| !t.is_empty()).unwrap_or("its target").to_string();
     let Some(t) = transformation.as_ref() else {
-        let datum = source_datum(&mut crs).ok_or("the bound coordinate system's source has no datum")?;
-        datum.items.push(Item::Node(Node::new("EXTENSION", UNTRANSFORMED, [Item::Text(to)])));
+        put_mark(&mut crs, UNTRANSFORMED, &to);
         return Ok(crs);
     };
     let method = t.child("METHOD");
@@ -817,8 +816,7 @@ fn bound(b: Node, depth: usize) -> Result<Node, String> {
             .filter(|f| !f.is_empty())
             .collect();
         let files = if files.is_empty() { String::new() } else { format!(" ({})", files.join(", ")) };
-        let datum = source_datum(&mut crs).ok_or("the bound coordinate system's source has no datum to give the shift to")?;
-        datum.items.push(Item::Node(Node::new("EXTENSION", UNAPPLIED, [Item::Text(format!("{method} transformation to {to}{files}"))])));
+        put_mark(&mut crs, UNAPPLIED, &format!("{method} transformation to {to}{files}"));
         return Ok(crs);
     };
     let scale = get(8611, "SCALE_DIFFERENCE", Measure::Scale);
@@ -1457,14 +1455,14 @@ fn towgs84(datum: Option<&Node>) -> Option<Vec<f64>> {
     datum.and_then(|d| d.child("TOWGS84")).map(Node::nums).filter(|t| (t.len() == 3 || t.len() == 7) && t.iter().all(|v| v.is_finite()))
 }
 
-/// The key of the `EXTENSION` [`bound`] puts on a datum for a transformation it can't apply: its
-/// value names it (`NTv2 transformation to WGS 84 (ntv2_0.gsb)`). The tree is read, never
-/// written out, so this stays within the reader.
-const UNAPPLIED: &str = "RUSTGIS_UNAPPLIED";
+/// The name of the mark [`bound`] leaves for a transformation it can't apply ([`put_mark`]): its
+/// title names it (`NTv2 transformation to WGS 84 (ntv2_0.gsb)`). [`Parser`] reads names of
+/// letters, digits and `_` only, so no file can give one; the tree is never written out.
+const UNAPPLIED: &str = "rustgis:unapplied";
 
-/// The key of the `EXTENSION` [`bound`] puts on the source's datum of a bound system without a
-/// transformation: its value names the target. Read, never written out, as [`UNAPPLIED`].
-const UNTRANSFORMED: &str = "RUSTGIS_UNTRANSFORMED";
+/// The name of the mark [`bound`] leaves for a bound system without a transformation: its title
+/// names the target. No file can give one either ([`UNAPPLIED`]).
+const UNTRANSFORMED: &str = "rustgis:untransformed";
 
 /// The datum of a WKT1 system (its own `GEOGCS`'s, or its base one's), where [`bound`] puts the
 /// shift or says why there is none.
@@ -1473,12 +1471,24 @@ fn source_datum(crs: &mut Node) -> Option<&mut Node> {
     geog.and_then(|g| g.child_mut("DATUM"))
 }
 
-/// The target a bound system without a transformation names ([`UNTRANSFORMED`]).
+/// Leaves the mark `name` titled `value` on a bound system's source: on its datum, or on the
+/// source itself when it has none, which is read as before without a datum.
+fn put_mark(crs: &mut Node, name: &str, value: &str) {
+    let mark = Item::Node(Node::new(name, value, []));
+    match source_datum(crs) {
+        Some(datum) => datum.items.push(mark),
+        None => crs.items.push(mark),
+    }
+}
+
+/// The title of the mark `name` [`put_mark`] left among `node`'s children.
+fn mark(node: Option<&Node>, name: &str) -> Option<String> {
+    node?.nodes().find(|n| n.name == name).map(|n| n.title().to_string())
+}
+
+/// The target a bound system without a transformation names ([`UNTRANSFORMED`]), on its datum.
 fn untransformed(datum: Option<&Node>) -> Option<String> {
-    datum?
-        .nodes()
-        .filter(|n| n.name.eq_ignore_ascii_case("EXTENSION") && n.title().eq_ignore_ascii_case(UNTRANSFORMED))
-        .find_map(|e| if let Some(Item::Text(to)) = e.items.get(1) { Some(to.clone()) } else { None })
+    mark(datum, UNTRANSFORMED)
 }
 
 /// At most 120 characters of `s`, for a notice: the names in it come from the file.
@@ -1495,14 +1505,16 @@ fn clip(s: &str) -> String {
 /// (`EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]`), whose `@null` is no shift. PROJ applies a grid only
 /// with its file, and refuses the system without it; RustGIS reads the datum without it.
 fn unapplied(datum: Option<&Node>) -> Option<String> {
-    datum?.nodes().filter(|n| n.name.eq_ignore_ascii_case("EXTENSION")).find_map(|e| {
-        let Some(Item::Text(value)) = e.items.get(1) else { return None };
-        if e.title().eq_ignore_ascii_case(UNAPPLIED) {
-            return Some(value.clone());
-        }
-        let grids: Vec<&str> =
-            value.split(',').map(str::trim).filter(|g| !g.is_empty() && !g.trim_start_matches('@').eq_ignore_ascii_case("null")).collect();
-        (e.title().eq_ignore_ascii_case("PROJ4_GRIDS") && !grids.is_empty()).then(|| format!("grid shift to WGS 84 ({})", grids.join(", ")))
+    mark(datum, UNAPPLIED).or_else(|| {
+        datum?.nodes().filter(|n| n.name.eq_ignore_ascii_case("EXTENSION") && n.title().eq_ignore_ascii_case("PROJ4_GRIDS")).find_map(|e| {
+            let Some(Item::Text(value)) = e.items.get(1) else { return None };
+            let grids: Vec<&str> = value
+                .split(',')
+                .map(str::trim)
+                .filter(|g| !g.is_empty() && !g.trim_start_matches('@').eq_ignore_ascii_case("null"))
+                .collect();
+            (!grids.is_empty()).then(|| format!("grid shift to WGS 84 ({})", grids.join(", ")))
+        })
     })
 }
 
@@ -2737,6 +2749,43 @@ pub(crate) mod tests {
         // A Helmert transformation is applied, and says nothing of it.
         let (_, note) = read_wkt(&bound_crs(OSGB36_WKT2, WGS84_WKT2, &[375.0, -111.0, 431.0])).unwrap();
         assert!(!note.as_deref().unwrap_or("").contains("isn't applied"), "{note:?}");
+        // The marks `bound` leaves can't come from a file: an extension or a node of a like name
+        // is read as any other it doesn't know, in WKT1 or WKT2, and the datum note stays.
+        for forged in [
+            r#"EXTENSION["RUSTGIS_UNAPPLIED","a forged grid"]"#,
+            r#"EXTENSION["RUSTGIS_UNTRANSFORMED","Mars"]"#,
+            r#"EXTENSION["rustgis:unapplied","a forged grid"]"#,
+            r#"RUSTGIS_UNAPPLIED["a forged grid"]"#,
+            r#"rustgis_untransformed["Mars"]"#,
+        ] {
+            let in_wkt1 = wkt1.replace(r#"EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]"#, forged);
+            assert_eq!(read_wkt(&in_wkt1), read_wkt(&plain), "{in_wkt1}");
+            let in_wkt2 = NAD27.replace(r#"ID["EPSG",6267]],PRIMEM"#, &format!(r#"ID["EPSG",6267],{forged}],PRIMEM"#));
+            assert_ne!(in_wkt2, NAD27);
+            assert_eq!(read_wkt(&in_wkt2), read_wkt(NAD27), "{in_wkt2}");
+        }
+        // Nor can a mark's own name be written: the parser reads no name with a colon.
+        assert!(read_wkt(&wkt1.replace(r#"EXTENSION["PROJ4_GRIDS","ntv2_0.gsb"]"#, r#"rustgis:unapplied["x"]"#)).is_err());
+        // A source without a datum is read as the source alone, as before, and the notice is
+        // said from its mark on the source itself.
+        let datum = r#"DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],"#;
+        for source in [NAD27, UTM17] {
+            let no_datum = source.replace(datum, "");
+            assert_ne!(no_datum, source);
+            let (alone, alone_note) = read_wkt(&no_datum).unwrap();
+            for (bound, said) in [
+                (format!(r#"BOUNDCRS[SOURCECRS[{no_datum}],TARGETCRS[{WGS84}]]"#), untransformed),
+                (
+                    grid(&no_datum, "x.gsb"),
+                    "the file's NTv2 transformation to WGS 84 (x.gsb) isn't applied, so positions may be off by as much as that shift",
+                ),
+            ] {
+                let (crs, note) = read_wkt(&bound).unwrap();
+                assert_eq!(crs, alone, "{bound}");
+                let expected = alone_note.as_ref().map_or_else(|| said.to_string(), |n| format!("{n}; {said}"));
+                assert_eq!(note, Some(expected), "{bound}");
+            }
+        }
     }
 
     /// The issue's case (#1678): a Shapefile whose `.prj` is NAD 27 bound to WGS 84 by an NTv2 grid,
