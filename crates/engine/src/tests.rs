@@ -33329,24 +33329,15 @@ fn web_mercator_exports_say_what_they_write_at_85_degrees() {
     assert!(s.map().layer(globe as u32).unwrap().is_raster());
     let mark = s.notice_mark();
     let out = dir.join("globe.gpkg").display().to_string();
-    let _ = s.run("share.exportLayer", &json!({"layer": globe, "path": out, "crs": "EPSG:3857"}));
+    s.run("share.exportLayer", &json!({"layer": globe, "path": out, "crs": "EPSG:3857"})).unwrap();
     assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
-    // Streamed, the countries exported a chunk at a time (to a GeoPackage) have their source's
-    // extent tell, without a count; read whole (for a Shapefile), they're counted.
+    // Streamed, the countries are counted as they're written a chunk at a time (to a GeoPackage),
+    // whatever extent the source declares, and read whole (for a Shapefile), from their features.
     let gpkg = dir.join("countries.gpkg").display().to_string();
     s.run("share.exportLayer", &json!({"layer": "Countries", "path": gpkg, "crs": "EPSG:4326"})).unwrap();
     s.run("layer.addData", &json!({"path": gpkg, "stream": true, "name": "Streamed"})).unwrap();
-    for (file, notice) in [
-        (
-            "streamed.gpkg",
-            "the extent of Streamed reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°, where Web Mercator ends"
-                .to_string(),
-        ),
-        (
-            "streamed.shp",
-            format!("{beyond} vertices of Streamed are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"),
-        ),
-    ] {
+    let notice = format!("{beyond} vertices of Streamed are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends");
+    for file in ["streamed.gpkg", "streamed.shp"] {
         let out = dir.join(file).display().to_string();
         let mark = s.notice_mark();
         s.run("share.exportLayer", &json!({"layer": "Streamed", "path": out, "crs": "EPSG:3857"})).unwrap();

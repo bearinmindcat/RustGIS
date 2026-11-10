@@ -485,11 +485,12 @@ pub fn export_notes<'a>(
 /// a Shapefile target (`.shp`, or zipped to `.zip`, as the exports name it) holds only geometry of
 /// the layer's kind, and of it only parts it can draw ([`io::shapefile_vertices`]). A missing
 /// coordinate, or an infinite longitude, isn't counted: it can't be projected, so the export
-/// refuses it. A layer whose features are only a window onto its source, or a streamed layer
-/// written a chunk at a time (which comes with no features), has its extent tell instead, without
-/// a count; as a source can declare a wider extent than its data's, that notice says only that
-/// the extent reaches beyond. The count is one pass over the coordinates, without a Cancel point,
-/// as the other notices' passes are.
+/// refuses it. A layer whose features are only a window onto its source (`windowed`) has its
+/// extent tell instead, without a count; as a source can declare a wider extent than its data's,
+/// that notice says only that the extent reaches beyond. A streamed layer written a chunk at a
+/// time comes with no features, and its export counts them as it writes them
+/// ([`export::Exported::beyond_web_mercator`], said by [`web_mercator_moved_note`]). The count is
+/// one pass over the coordinates, without a Cancel point, as the other notices' passes are.
 fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) -> Option<String> {
     use rustgis_geom::MAX_LAT;
     let shapefile = std::path::Path::new(target)
@@ -510,10 +511,27 @@ fn web_mercator_note(layers: &[(&Dataset, rustgis_geom::Extent)], target: &str) 
                     }
                 }
             }
-            let past = !e.is_empty() && (e.min_y < -MAX_LAT || e.max_y > MAX_LAT);
+            let past = ds.windowed && !e.is_empty() && (e.min_y < -MAX_LAT || e.max_y > MAX_LAT);
             if moved > 0 { Some((ds.name.as_str(), Some(moved))) } else { past.then_some((ds.name.as_str(), None)) }
         })
         .collect();
+    web_mercator_said(&beyond, target)
+}
+
+/// What an export in Web Mercator written a chunk at a time says of the `moved` vertices of
+/// `layer` it wrote at 85.05° north or south, where Web Mercator ends, as it counted them
+/// ([`export::Exported::beyond_web_mercator`]): as [`export_notes`] says it of a layer it has
+/// whole. `None` for none.
+pub fn web_mercator_moved_note(target: &str, layer: &str, moved: usize) -> Option<String> {
+    if moved == 0 {
+        return None;
+    }
+    web_mercator_said(&[(layer, Some(moved))], target)
+}
+
+/// The 85.05° notice for the layers `beyond` (each with its count of vertices moved, or `None`
+/// when only its extent tells), or `None` for none.
+fn web_mercator_said(beyond: &[(&str, Option<usize>)], target: &str) -> Option<String> {
     let total: Option<usize> = beyond.iter().map(|(_, n)| *n).sum();
     let names: Vec<&str> = beyond.iter().map(|(name, _)| *name).collect();
     let said = match (names.as_slice(), total) {

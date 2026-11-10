@@ -619,25 +619,28 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
         return Err(format!("{path}: {e}"));
     }
     let parquet = matches!(ext.as_str(), "parquet" | "geoparquet");
-    let (written, left_out, skipped, table, unfit) = match &chunks {
+    let (written, left_out, skipped, table, unfit, moved) = match &chunks {
         Some((src, layer)) => {
             let (e, table) =
                 rustgis_data::export::write_source_to(src.as_ref(), layer, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
             // Counted as the chunks were written, as the layer holds none of them.
             let unfit = rustgis_data::source::parquet::unfit_note(&layer.fields, &e.unfit, path);
-            (e.written, e.left_out, e.skipped, table, unfit)
+            let moved = rustgis_data::web_mercator_moved_note(path, &layer.name, e.beyond_web_mercator);
+            (e.written, e.left_out, e.skipped, table, unfit, moved)
         }
         None => {
             let (left_out, table) = rustgis_data::io::write_path_to(ds, Path::new(&path), crs, &gpkg).map_err(|e| e.to_string())?;
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
-            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit)
+            (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit, None)
         }
     };
     // The features written give their own extent. A streamed layer written a chunk at a time has
-    // none at hand, and its whole source's extent tells instead. (A raster layer's extent is its
-    // raster's, which the file doesn't hold.)
+    // none at hand, and its whole source's extent tells instead (the vertices written at 85.05°
+    // in Web Mercator, the export counted). A raster layer's extent is its raster's, which the
+    // file doesn't hold.
     let extent = if chunks.is_some() { l.extent() } else { ds.extent() };
-    let notes = rustgis_data::export_notes([(ds, extent)], path, crs);
+    let mut notes = rustgis_data::export_notes([(ds, extent)], path, crs);
+    notes.extend(moved);
     // A Shapefile (`.shp`, or zipped to `.zip`) cuts field names to dBase's.
     let shapefile = matches!(ext.as_str(), "shp" | "zip");
     let mut dbf_notes = Vec::new();

@@ -3542,6 +3542,10 @@ mod tests {
             ]
         );
         assert!(crate::export_notes([(&window, Extent::new(-180.0, -80.0, 180.0, 84.0))], "tiles.gpkg", Crs::WebMercator).is_empty());
+        // A layer without features that isn't a window (a raster layer's, or a streamed layer's
+        // written a chunk at a time, whose export counts as it writes) has no extent tell.
+        let empty = Dataset::new("empty", GeometryType::Point, vec![]);
+        assert!(crate::export_notes([(&empty, Extent::new(-180.0, -90.0, 180.0, 90.0))], "empty.gpkg", Crs::WebMercator).is_empty());
         // A Shapefile holds only geometry of the layer's kind, and of it only parts it can draw:
         // the vertices it leaves out aren't counted, though a GeoPackage holds them. Of the lines,
         // the 2 vertices of the first are written, not the one-vertex part or the point. Of the
