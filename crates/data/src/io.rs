@@ -2701,7 +2701,7 @@ pub fn shapefile_geometry_notes(ds: &Dataset, target: &str) -> Vec<String> {
         let (one, many, why) = if ds.geometry_type == GeometryType::Polyline {
             ("line part", "line parts", "with fewer than 2 drawable vertices")
         } else {
-            ("polygon ring", "polygon rings", "with fewer than 3 drawable vertices or in a polygon whose outer ring was")
+            ("polygon ring", "polygon rings", "with fewer than 3 drawable vertices or in a polygon whose outer ring was left out")
         };
         let what = if parts == 1 { format!("1 {one} was") } else { format!("{parts} {many} were") };
         notes.push(format!("{target}: {what} left out of the Shapefile, {why}"));
@@ -2962,7 +2962,7 @@ mod tests {
             shapefile_geometry_notes(&polys, "polys.shp"),
             [
                 "polys.shp: 5 vertices with a missing or infinite coordinate were left out of the Shapefile",
-                "polys.shp: 3 polygon rings were left out of the Shapefile, with fewer than 3 drawable vertices or in a polygon whose outer ring was",
+                "polys.shp: 3 polygon rings were left out of the Shapefile, with fewer than 3 drawable vertices or in a polygon whose outer ring was left out",
             ]
         );
 
