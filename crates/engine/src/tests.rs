@@ -33307,13 +33307,15 @@ fn web_mercator_exports_say_what_they_write_at_85_degrees() {
     );
     let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
     assert!((south(&s, back) + rustgis_geom::MAX_LAT).abs() < 1e-6, "{}", south(&s, back));
-    // In longitude/latitude, the South Pole is kept and nothing is said of it.
+    // In longitude/latitude, the layer's southern edge is kept as it is, and nothing is said of it.
+    let source_south = s.map().layers.iter().find(|l| l.name == "Countries").unwrap().dataset.extent().min_y;
+    assert!(source_south < -rustgis_geom::MAX_LAT, "{source_south}");
     let mark = s.notice_mark();
     let lonlat = dir.join("countries-4326.shp");
     s.run("share.exportLayer", &json!({"layer": "Countries", "path": lonlat, "crs": "EPSG:4326"})).unwrap();
     assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
     let back = s.run("layer.addData", &json!({"path": lonlat})).unwrap()["layer"].as_u64().unwrap() as u32;
-    assert!(south(&s, back) < -rustgis_geom::MAX_LAT, "{}", south(&s, back));
+    assert!((south(&s, back) - source_south).abs() < 1e-6, "{} for {source_south}", south(&s, back));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
