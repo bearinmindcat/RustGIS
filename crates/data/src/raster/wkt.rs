@@ -489,7 +489,10 @@ const PARIS_IN_DEGREES: f64 = 2.337_229_17;
 /// gives its projection's angular parameters and its prime meridian in its `GEOGCS`'s angle unit:
 /// NTF (Paris) / Lambert zone II has its latitude of origin at 52 grads, which is 46.8°. GDAL and
 /// Esri write the Paris meridian in degrees all the same (2.33722917 beside grads), and that is
-/// kept, as PROJ keeps it. A system in degrees is unchanged.
+/// kept, as PROJ keeps it, without a notice: read in grads, 2.33722917 is 2.1035°E, not Paris
+/// (2.5969213 grads), so a meridian named Paris with that value agrees with its name only in
+/// degrees, and a notice would come with every NTF file GDAL and Esri write. Paris in grads, or
+/// another meridian, is converted. A system in degrees is unchanged.
 fn projected1(mut p: Node) -> Node {
     let f = factor(p.child("GEOGCS").and_then(|g| g.child("UNIT")));
     let paris_in_degrees = |pm: &Node| norm(pm.title()) == "PARIS" && pm.num(0).is_some_and(|v| (v - PARIS_IN_DEGREES).abs() < 1e-7);
@@ -511,9 +514,12 @@ fn projected1(mut p: Node) -> Node {
 
 /// Whether a WKT1 projection parameter, by its [`norm`]alized name, is an angle: a latitude, a
 /// longitude, a meridian, a parallel, an azimuth or another angle (`Rectified_Grid_Angle`,
-/// Krovak's `XY_Plane_Rotation`). False eastings and northings, scale factors and heights aren't.
+/// Krovak's `XY_Plane_Rotation`). False eastings and northings, scale factors and heights aren't,
+/// a scale factor not even with a parallel in its name (EPSG's `Scale factor on pseudo standard
+/// parallel`, Krovak's).
 fn angular(name: &str) -> bool {
-    ["LATITUDE", "LONGITUDE", "MERIDIAN", "PARALLEL", "AZIMUTH", "ANGLE", "ROTATION"].iter().any(|w| name.contains(w))
+    !name.contains("SCALE")
+        && ["LATITUDE", "LONGITUDE", "MERIDIAN", "PARALLEL", "AZIMUTH", "ANGLE", "ROTATION"].iter().any(|w| name.contains(w))
 }
 
 /// The parts of a compound system that can be its horizontal one.
@@ -2632,6 +2638,10 @@ pub(crate) mod tests {
         let degrees = GDAL.replace(r#"UNIT["grad",0.0157079632679489"#, r#"UNIT["degree",0.0174532925199433"#);
         let proj4 = crs_from_wkt(&degrees).unwrap().custom_def().map(|d| d.proj4.clone()).unwrap_or_default();
         assert!(proj4.contains("+lat_0=52 ") && proj4.contains("+k_0=0.99987742 ") && proj4.contains("+x_0=600000 "), "{proj4}");
+        // A scale factor stays a scale, though its name has a parallel in it (EPSG's name for
+        // Krovak's scale), and the parallel itself is an angle.
+        assert!(!angular(&norm("Scale_Factor_On_Pseudo_Standard_Parallel")));
+        assert!(angular(&norm("Pseudo_Standard_Parallel_1")));
     }
 
     /// Krovak East North (EPSG:5514) in Esri WKT with its angles in grads, as WKT1 allows, places
