@@ -1109,12 +1109,17 @@ fn geographic(c: &Array) -> bool {
         || matches!(c.name().to_ascii_lowercase().as_str(), "lat" | "lon" | "latitude" | "longitude")
 }
 
-/// The coordinate system a variable's attributes (or its grid mapping's) say.
-fn crs_of(store: &Store, a: &Array) -> Option<Crs> {
+/// The coordinate system a variable's attributes (or its grid mapping's) say, and what reading its
+/// WKT said, as for a `.prj` ([`super::wkt::read_wkt`]).
+fn crs_of(store: &Store, a: &Array) -> Option<(Crs, Option<String>)> {
+    let read = |t: &str| {
+        let t = t.trim();
+        if t.contains('[') { super::wkt::read_wkt(t).ok() } else { Crs::parse(t).ok().map(|c| (c, None)) }
+    };
     let from = |x: &Array| {
         for k in ["crs_wkt", "spatial_ref", "crs", "proj4", "proj4text", "proj4_params"] {
-            if let Some(t) = attr_str(x, k).and_then(|t| Crs::parse(t).ok()) {
-                return Some(t);
+            if let Some(read) = attr_str(x, k).and_then(read) {
+                return Some(read);
             }
         }
         for k in ["epsg_code", "epsg"] {
@@ -1124,7 +1129,7 @@ fn crs_of(store: &Store, a: &Array) -> Option<Crs> {
                 _ => None,
             };
             if let Some(c) = code.and_then(|c| u32::try_from(c).ok()).and_then(Crs::from_epsg) {
-                return Some(c);
+                return Some((c, None));
             }
         }
         None
@@ -1289,7 +1294,8 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         dx = -dx;
     }
     let lonlat = geographic(yc) && geographic(xc);
-    let crs = if lonlat { Some(Crs::LonLat) } else { crs_of(store, a).or(crs) };
+    let (crs, crs_note) =
+        if lonlat { (Some(Crs::LonLat), None) } else { crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note)) };
     let Some(crs) = crs else {
         return Err(bad(format!("{}: the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)", a.path)));
     };
@@ -1324,6 +1330,7 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
     if rounded > 0 {
         r.rounded = vec![rounded];
     }
+    r.lost.extend(crs_note);
     Ok(r)
 }
 
@@ -1424,7 +1431,7 @@ pub fn is_lonlat_grid(store: &Store, variable: &str) -> bool {
 
 /// The coordinate system `variable`'s attributes (or its grid mapping's) say, for a projected grid.
 pub fn grid_crs(store: &Store, variable: &str) -> Option<Crs> {
-    store.array(variable).and_then(|a| crs_of(store, a))
+    store.array(variable).and_then(|a| crs_of(store, a)).map(|(crs, _)| crs)
 }
 
 /// The stored (row, column) of `variable`'s map cell holding the point (`x`, `y`), in the grid's
@@ -2271,6 +2278,48 @@ mod tests {
         let mut idx: Vec<u8> = index.iter().flat_map(|v| if index_little { v.to_le_bytes() } else { v.to_be_bytes() }).collect();
         idx.extend([0u8; 4]);
         if index_at_end { [body, idx].concat() } else { [idx, body].concat() }
+    }
+
+    /// A store's own WKT is read as a `.prj` is: UTM zone 17N on NAD 27, bound to WGS 84 by the
+    /// NTv2 grid `conus`, is read without the grid, which the raster says; WGS 84's UTM zone 17N,
+    /// as WKT or by its code, says nothing (#1678).
+    #[test]
+    fn a_stores_wkt_says_a_grid_it_doesnt_apply() {
+        use crate::raster::wkt::tests::{BOUND_BY_A_GRID, NAD27_UTM17};
+        let said = "the file's NTv2 transformation to WGS 84 (conus) isn't applied, so positions may be off by as much as that shift";
+        // The system alone says its datum has no shift, as from a `.prj`; WGS 84's says nothing.
+        let datum = "the datum North American Datum 1927 has no conversion to WGS 84 in the file, so positions may be off by up to a few hundred metres";
+        let utm17 = crate::raster::wkt::to_wkt(Crs::Epsg(32617)).unwrap();
+        let coords = |dim: &str, n: usize| serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}], "fill_value": 0, "dimension_names": [dim]});
+        let bytes = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let chunks = HashMap::from([
+            ("elev/c/0/0".to_string(), [1i16, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect()),
+            ("y/c/0".to_string(), bytes(&[4_800_100.0, 4_800_000.0])),
+            ("x/c/0".to_string(), bytes(&[500_000.0, 500_100.0])),
+        ]);
+        for (attrs, crs, lost) in [
+            (serde_json::json!({"crs_wkt": BOUND_BY_A_GRID}), Crs::parse(NAD27_UTM17).unwrap(), vec![said]),
+            (serde_json::json!({"spatial_ref": BOUND_BY_A_GRID}), Crs::parse(NAD27_UTM17).unwrap(), vec![said]),
+            (serde_json::json!({"crs_wkt": NAD27_UTM17}), Crs::parse(NAD27_UTM17).unwrap(), vec![datum]),
+            (serde_json::json!({"crs_wkt": utm17}), Crs::Epsg(32617), vec![]),
+            (serde_json::json!({"epsg_code": 32617}), Crs::Epsg(32617), vec![]),
+        ] {
+            let elev = serde_json::json!({
+                "zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": "int16",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+                "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0, "dimension_names": ["y", "x"], "attributes": attrs
+            });
+            let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "elev": elev, "y": coords("y", 2), "x": coords("x", 2),
+            }}});
+            let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
+            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
+            let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
+            assert_eq!(r.crs, crs, "{attrs}");
+            assert_eq!(r.lost, lost, "{attrs}");
+        }
     }
 
     #[test]

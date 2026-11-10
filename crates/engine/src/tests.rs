@@ -18371,20 +18371,26 @@ fn a_typed_crs_says_its_grid_isnt_applied() {
     std::fs::write(&csv, "e,n\n500000,4800000\n").unwrap();
     for (definition, expected) in [(bound, 1), ("EPSG:32617", 0)] {
         let mut s = Session::new(Project::default());
-        let count = |s: &Session, mark| s.notices_since(mark).iter().filter(|n| n.text.contains(said)).count();
+        // The notice, and every notice of a transformation not applied or missing: only it, or none.
+        let count = |s: &Session, mark| {
+            let notices = s.notices_since(mark);
+            let of = |text: &str| notices.iter().filter(|n| n.text.contains(text)).count();
+            let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no transformation")).count();
+            (of(said), shifts)
+        };
         let mark = s.notice_mark();
         let added = s.run("layer.addData", &json!({"path": csv, "x": "e", "y": "n", "crs": definition})).unwrap();
         let id = added["layer"].as_u64().unwrap() as u32;
         // On UTM zone 17N's central meridian, 81°W.
         let at = s.map().layer(id).unwrap().dataset.features[0].geometry.as_ref().unwrap().label_point().unwrap();
         assert!((at.x + 81.0).abs() < 1e-3, "{at:?}");
-        assert_eq!(count(&s, mark), expected, "csv {definition}: {:?}", s.notices_since(mark));
+        assert_eq!(count(&s, mark), (expected, expected), "csv {definition}: {:?}", s.notices_since(mark));
         let mark = s.notice_mark();
         s.run("layer.defineProjection", &json!({"layer": id, "crs": definition})).unwrap();
-        assert_eq!(count(&s, mark), expected, "define {definition}: {:?}", s.notices_since(mark));
+        assert_eq!(count(&s, mark), (expected, expected), "define {definition}: {:?}", s.notices_since(mark));
         let mark = s.notice_mark();
         s.run("share.exportLayer", &json!({"layer": id, "path": dir.join(format!("out-{expected}.shp")), "crs": definition})).unwrap();
-        assert_eq!(count(&s, mark), expected, "export {definition}: {:?}", s.notices_since(mark));
+        assert_eq!(count(&s, mark), (expected, expected), "export {definition}: {:?}", s.notices_since(mark));
     }
     std::fs::remove_dir_all(dir).unwrap();
 }

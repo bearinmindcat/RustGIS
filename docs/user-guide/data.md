@@ -117,9 +117,9 @@ or other WKT:
   `BOUNDCRS` without a transformation, which PROJ refuses, is read as its source system, with a
   notice.
 - The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
-  FileGDB's system, or a LAS file. WKT given as a command's `crs`, and a GeoPackage system read by
-  its EPSG code, say only the two above: a transformation that isn't applied, and a `BOUNDCRS`
-  without one. WKT in a Zarr store says none of them for now.
+  FileGDB's system, a LAS file or a Zarr store. WKT given as a command's `crs` (a database
+  layer's too, which is read by its EPSG code), and a GeoPackage system read by its EPSG code, say
+  only the two above: a transformation that isn't applied, and a `BOUNDCRS` without one.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that
   zone's.
 - Projected axes pointing west or south, as in South Africa's Lo grids, are read as such, or
