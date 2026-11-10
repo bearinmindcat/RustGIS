@@ -3457,6 +3457,70 @@ mod tests {
         );
     }
 
+    /// An export in Web Mercator writes a latitude beyond 85.05°, an infinite one too, at 85.05°,
+    /// where Web Mercator ends, and says how many vertices it moved; for a streamed layer, its
+    /// source's extent tells. Within 85.05°, or in another system, nothing is said of it.
+    #[test]
+    fn a_web_mercator_export_says_what_it_writes_at_85_degrees() {
+        use rustgis_geom::{Extent, MAX_LAT, lonlat_to_merc, merc_to_lonlat};
+        let c = Coord::new;
+        let ext = |ds: &Dataset| ds.extent();
+        let layer = |name: &str, points: &[Coord]| {
+            let mut ds = Dataset::new(name, GeometryType::Point, vec![]);
+            for p in points {
+                ds.push(Some(Geometry::Point(*p)), vec![]);
+            }
+            ds
+        };
+        let polar = layer("polar", &[c(10.0, 89.0), c(20.0, -90.0), c(30.0, 60.0), c(40.0, f64::INFINITY)]);
+        // What the export writes: each latitude beyond at 85.05°.
+        let merc = project(&polar, Crs::WebMercator).unwrap();
+        let written: Vec<Coord> = merc
+            .features
+            .iter()
+            .filter_map(|f| match f.geometry {
+                Some(Geometry::Point(p)) => Some(merc_to_lonlat(p)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(written.len(), 4);
+        for (w, lat) in written.iter().zip([MAX_LAT, -MAX_LAT, 60.0, MAX_LAT]) {
+            assert!((w.y - lat).abs() < 1e-9, "{w:?}");
+        }
+        assert_eq!(merc.features[0].geometry, Some(Geometry::Point(lonlat_to_merc(c(10.0, MAX_LAT)))));
+        assert_eq!(
+            crate::export_notes([(&polar, ext(&polar))], "polar.shp", Crs::WebMercator),
+            ["polar.shp: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"]
+        );
+        // In another system, or within 85.05°: nothing.
+        for crs in [Crs::LonLat, Crs::Epsg(32631)] {
+            assert!(crate::export_notes([(&polar, ext(&polar))], "polar.shp", crs).is_empty(), "{crs:?}");
+        }
+        let within = layer("within", &[c(30.0, 60.0), c(0.0, -MAX_LAT)]);
+        assert!(crate::export_notes([(&within, ext(&within))], "within.shp", Crs::WebMercator).is_empty());
+        // One vertex; and several layers in one notice, counting the vertices of all.
+        let one = layer("one", &[c(0.0, 86.0)]);
+        assert_eq!(
+            crate::export_notes([(&one, ext(&one))], "one.gpkg", Crs::WebMercator),
+            ["one.gpkg: 1 vertex of one is beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"]
+        );
+        assert_eq!(
+            crate::export_notes([(&polar, ext(&polar)), (&within, ext(&within)), (&one, ext(&one))], "map.gpkg", Crs::WebMercator),
+            [
+                "map.gpkg: 4 vertices of 2 layers (polar, one) are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"
+            ]
+        );
+        // A streamed layer's features are only those in view: its source's extent tells, without
+        // a count.
+        let mut window = layer("tiles", &[c(0.0, 0.0)]);
+        window.windowed = true;
+        assert_eq!(
+            crate::export_notes([(&window, Extent::new(-180.0, -90.0, 180.0, 84.0))], "tiles.gpkg", Crs::WebMercator),
+            ["tiles.gpkg: the parts of tiles are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends"]
+        );
+        assert!(crate::export_notes([(&window, Extent::new(-180.0, -80.0, 180.0, 84.0))], "tiles.gpkg", Crs::WebMercator).is_empty());
+    }
+
     #[test]
     fn wkt_geometries() {
         use crate::interop::parse_wkt;

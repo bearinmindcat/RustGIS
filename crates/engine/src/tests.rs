@@ -33277,6 +33277,46 @@ fn shapefile_exports_say_which_field_names_they_changed() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Exporting to Web Mercator says how many vertices beyond 85.05° it writes at 85.05°, where Web
+/// Mercator ends: the World Atlas's countries reach the South Pole, and the file's stop at 85.05°
+/// south. In longitude/latitude nothing is said of it.
+#[test]
+fn web_mercator_exports_say_what_they_write_at_85_degrees() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-merc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("where Web Mercator ends")).map(|n| n.text.clone()).collect()
+    };
+    let south = |s: &Session, id: u32| s.map().layer(id).unwrap().dataset.extent().min_y;
+    let mut beyond = 0;
+    for g in
+        s.map().layers.iter().filter(|l| l.name == "Countries").flat_map(|l| l.dataset.features.iter()).filter_map(|f| f.geometry.as_ref())
+    {
+        g.for_each_coord(|c| beyond += usize::from(c.y.abs() > rustgis_geom::MAX_LAT));
+    }
+    assert!(beyond > 0);
+    let out = dir.join("countries.shp").display().to_string();
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": "Countries", "path": out, "crs": "EPSG:3857"})).unwrap();
+    assert_eq!(
+        said(&s, mark),
+        [format!("{out}: {beyond} vertices of Countries are beyond 85.05° north or south, and written at 85.05°, where Web Mercator ends")],
+        "{:?}",
+        s.notices_since(mark)
+    );
+    let back = s.run("layer.addData", &json!({"path": out})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert!((south(&s, back) + rustgis_geom::MAX_LAT).abs() < 1e-6, "{}", south(&s, back));
+    // In longitude/latitude, the South Pole is kept and nothing is said of it.
+    let mark = s.notice_mark();
+    let lonlat = dir.join("countries-4326.shp");
+    s.run("share.exportLayer", &json!({"layer": "Countries", "path": lonlat, "crs": "EPSG:4326"})).unwrap();
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    let back = s.run("layer.addData", &json!({"path": lonlat})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert!(south(&s, back) < -rustgis_geom::MAX_LAT, "{}", south(&s, back));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_cancelled_tool_leaves_the_map_as_it_was_and_says_so_in_the_history() {
     let mut s = world();
