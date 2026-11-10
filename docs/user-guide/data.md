@@ -111,6 +111,10 @@ or other WKT:
   none of these, when the target gives a zero transformation where its datum has another (a
   writer's placeholder, as for ED50 or NAD 27), or when combining the two transformations'
   rotations could be off by a centimetre.
+- A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS`), or
+  another without Helmert translations, isn't applied: the system is read without it, with a
+  notice naming it and its grid file, as positions may be off by as much as that shift. A
+  `BOUNDCRS` without a transformation is refused, as in PROJ.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that
   zone's.
 - Projected axes pointing west or south, as in South Africa's Lo grids, are read as such, or
