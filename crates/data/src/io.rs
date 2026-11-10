@@ -2643,8 +2643,9 @@ fn shapefile_keeps(g: Option<&Geometry>, gt: GeometryType) -> bool {
 
 /// What [`shapefile_parts_in`] leaves out of geometry `g` it writes to a layer of type `gt`, as
 /// (vertices, parts): the vertices with a missing or infinite coordinate, and the line parts and
-/// polygon rings left with too few vertices to draw (a part needs two, a ring three), a hole
-/// going with its polygon's outer ring. The same filters as the writer's.
+/// polygon rings with too few vertices to draw (a part needs two, a ring three), whether written
+/// so or left so by those vertices, a hole going with its polygon's outer ring. The same filters
+/// as the writer's.
 fn shapefile_geometry_losses(g: Option<&Geometry>, gt: GeometryType) -> (usize, usize) {
     fn finite(r: &[Coord]) -> usize {
         r.iter().filter(|c| c.x.is_finite() && c.y.is_finite()).count()
@@ -2676,7 +2677,7 @@ fn shapefile_geometry_losses(g: Option<&Geometry>, gt: GeometryType) -> (usize, 
 
 /// What an export to a Shapefile says it leaves out of the geometry it writes, one notice per
 /// kind with a count, or none: vertices with a missing (NaN) or infinite coordinate, and the line
-/// parts or polygon rings left without enough vertices to draw. Features left out whole are
+/// parts or polygon rings without enough vertices to draw. Features left out whole are
 /// [`left_out_note`]'s. `target` names what was written; line breaks and other control
 /// characters in it show as spaces.
 pub fn shapefile_geometry_notes(ds: &Dataset, target: &str) -> Vec<String> {
@@ -2698,9 +2699,9 @@ pub fn shapefile_geometry_notes(ds: &Dataset, target: &str) -> Vec<String> {
     }
     if parts > 0 {
         let (one, many, why) = if ds.geometry_type == GeometryType::Polyline {
-            ("line part", "line parts", "left with fewer than 2 drawable vertices")
+            ("line part", "line parts", "with fewer than 2 drawable vertices")
         } else {
-            ("polygon ring", "polygon rings", "left with fewer than 3 drawable vertices or in a polygon whose outer ring was")
+            ("polygon ring", "polygon rings", "with fewer than 3 drawable vertices or in a polygon whose outer ring was")
         };
         let what = if parts == 1 { format!("1 {one} was") } else { format!("{parts} {many} were") };
         notes.push(format!("{target}: {what} left out of the Shapefile, {why}"));
@@ -2925,9 +2926,11 @@ mod tests {
             ["mp.shp: 1 vertex with a missing or infinite coordinate was left out of the Shapefile"]
         );
 
-        // Lines: two vertices go, and the part left with one finite vertex goes with them.
+        // Lines: two vertices go, and the part left with one finite vertex goes with them, as does
+        // a part written with one vertex.
         let mut lines = Dataset::new("lines", GeometryType::Polyline, vec![]);
-        lines.push(Some(Geometry::Line(vec![vec![c(0., 0.), c(nan, 1.), c(2., 2.)], vec![c(5., 5.), c(inf, 6.)]])), vec![]);
+        let parts = vec![vec![c(0., 0.), c(nan, 1.), c(2., 2.)], vec![c(5., 5.), c(inf, 6.)], vec![c(9., 9.)]];
+        lines.push(Some(Geometry::Line(parts)), vec![]);
         assert_eq!(write_path(&lines, &dir.path().join("lines.shp"))?, 0);
         let (back, _) = read_path(&dir.path().join("lines.shp"))?;
         assert_eq!(coords(&back.features[0].geometry), 2);
@@ -2935,7 +2938,7 @@ mod tests {
             shapefile_geometry_notes(&lines, "lines.shp"),
             [
                 "lines.shp: 2 vertices with a missing or infinite coordinate were left out of the Shapefile",
-                "lines.shp: 1 line part was left out of the Shapefile, left with fewer than 2 drawable vertices",
+                "lines.shp: 2 line parts were left out of the Shapefile, with fewer than 2 drawable vertices",
             ]
         );
 
@@ -2959,7 +2962,7 @@ mod tests {
             shapefile_geometry_notes(&polys, "polys.shp"),
             [
                 "polys.shp: 5 vertices with a missing or infinite coordinate were left out of the Shapefile",
-                "polys.shp: 3 polygon rings were left out of the Shapefile, left with fewer than 3 drawable vertices or in a polygon whose outer ring was",
+                "polys.shp: 3 polygon rings were left out of the Shapefile, with fewer than 3 drawable vertices or in a polygon whose outer ring was",
             ]
         );
 
