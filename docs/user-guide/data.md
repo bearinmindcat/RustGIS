@@ -118,8 +118,8 @@ or other WKT:
   notice.
 - The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
   FileGDB's system, or a LAS file. WKT given as a command's `crs`, and a GeoPackage system read by
-  its EPSG code, say only that a transformation isn't applied. WKT in a Zarr store says none of
-  them for now.
+  its EPSG code, say only the two above: a transformation that isn't applied, and a `BOUNDCRS`
+  without one. WKT in a Zarr store says none of them for now.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that
   zone's.
 - Projected axes pointing west or south, as in South Africa's Lo grids, are read as such, or

@@ -290,7 +290,18 @@ pub fn unapplied_note(text: &str) -> Option<String> {
 /// projection compatibility choice ([`projection_compatibility_note`]) and a shift it doesn't
 /// apply ([`unapplied_note`]).
 pub fn typed_crs_note(text: &str, crs: Crs) -> Option<String> {
-    let notes: Vec<String> = projection_compatibility_note(text, crs).map(str::to_owned).into_iter().chain(unapplied_note(text)).collect();
+    compatibility_and_dropped(text, crs, "the definition's")
+}
+
+/// [`typed_crs_note`] for a file's own text, whose other notes are said otherwise (another body's
+/// `.prj` next to a grid): the shift it doesn't apply is the file's.
+pub(crate) fn file_crs_note(text: &str, crs: Crs) -> Option<String> {
+    compatibility_and_dropped(text, crs, "the file's")
+}
+
+fn compatibility_and_dropped(text: &str, crs: Crs, whose: &str) -> Option<String> {
+    let dropped = parse(text).ok().and_then(|n| wkt1(n, 0).ok()).and_then(|root| dropped_note(&root, whose));
+    let notes: Vec<String> = projection_compatibility_note(text, crs).map(str::to_owned).into_iter().chain(dropped).collect();
     (!notes.is_empty()).then(|| notes.join("; "))
 }
 
