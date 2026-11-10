@@ -33096,6 +33096,17 @@ fn shapefile_exports_say_which_vertices_they_leave_out() {
     let mark = s.notice_mark();
     s.run("share.exportLayer", &json!({"layer": clean, "path": dir.join("clean.shp")})).unwrap();
     assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // Projected, an infinite latitude is written (Web Mercator puts it at 85.05°), and nothing is
+    // said of it; in longitude/latitude it's left out, and said.
+    let mut polar = Dataset::new("polar", GeometryType::Point, vec![]);
+    polar.push(Some(Geometry::MultiPoint(vec![Coord::new(0.0, 0.0), Coord::new(1.0, f64::INFINITY), Coord::new(2.0, 2.0)])), vec![]);
+    let polar = s.map_mut().add_layer(rustgis_map::Layer::new(0, polar));
+    for (crs, file, notes) in [("EPSG:3857", "polar-3857.shp", 0), ("EPSG:4326", "polar-4326.shp", 1)] {
+        let out = dir.join(file).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": polar, "path": out, "crs": crs})).unwrap();
+        assert_eq!(said(&s, mark).len(), notes, "{crs}: {:?}", s.notices_since(mark));
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
