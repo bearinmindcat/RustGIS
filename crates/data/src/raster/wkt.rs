@@ -1234,7 +1234,7 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
                 && get(&["PSEUDO_STANDARD_PARALLEL_1"]).is_some_and(|v| (v - 78.5).abs() < 1e-10)
                 && get(&["X_SCALE"]).is_none_or(|v| v == -1.0)
                 && get(&["Y_SCALE"]).is_none_or(|v| v == 1.0)
-                && get(&["XY_PLANE_ROTATION"]).is_none_or(|v| v == 90.0) =>
+                && get(&["XY_PLANE_ROTATION"]).is_none_or(|v| (v - 90.0).abs() < 1e-10) =>
         {
             format!("+proj=krovak +lat_0={lat0} +k_0={k0} {at}")
         }
@@ -2612,12 +2612,16 @@ pub(crate) mod tests {
         let paris_in_grads = GDAL.replace(r#"PRIMEM["Paris",2.33722917"#, r#"PRIMEM["Paris",2.5969213"#);
         let another = GDAL.replace(r#"PRIMEM["Paris""#, r#"PRIMEM["Another""#);
         let west = Coord::new(1.446_997_288, 46.735_054_487);
+        // A central meridian of 10 grads is 9° east of Paris's (PROJ 9.8.1 places the point there).
+        let ten = GDAL.replace(r#"PARAMETER["central_meridian",0]"#, r#"PARAMETER["central_meridian",10]"#);
+        let east = Coord::new(10.680_720_205, 46.735_054_487);
         let cases = [
             ("WKT1", GDAL, ntf),
             ("Esri", ESRI, ntf),
             ("WKT2", WKT2, ntf),
             ("Paris in grads", &paris_in_grads, ntf),
             ("another", &another, west),
+            ("a central meridian of 10 grads", &ten, east),
         ];
         for (what, wkt, at) in cases {
             let crs = crs_from_wkt(wkt).unwrap_or_else(|e| panic!("{what}: {e}"));
@@ -2628,6 +2632,34 @@ pub(crate) mod tests {
         let degrees = GDAL.replace(r#"UNIT["grad",0.0157079632679489"#, r#"UNIT["degree",0.0174532925199433"#);
         let proj4 = crs_from_wkt(&degrees).unwrap().custom_def().map(|d| d.proj4.clone()).unwrap_or_default();
         assert!(proj4.contains("+lat_0=52 ") && proj4.contains("+k_0=0.99987742 ") && proj4.contains("+x_0=600000 "), "{proj4}");
+    }
+
+    /// Krovak East North (EPSG:5514) in Esri WKT with its angles in grads, as WKT1 allows, places
+    /// the corpus's point as in degrees: its plane rotation of 100 grads converts to 90° but for
+    /// the last bit, which the check for Krovak's fixed rotation allows. Another rotation is
+    /// still refused.
+    #[test]
+    fn wkt1_krovak_in_grads_is_read_as_in_degrees() {
+        let row = include_str!("esri_datum_corpus.tsv").lines().find(|l| l.starts_with("5514\t")).unwrap();
+        let cols: Vec<&str> = row.split('\t').collect();
+        let (xy, lonlat) = (
+            Coord::new(cols[1].parse().unwrap(), cols[2].parse().unwrap()),
+            Coord::new(cols[3].parse().unwrap(), cols[4].parse().unwrap()),
+        );
+        let grads = cols[5]
+            .replace(r#"UNIT["Degree",0.0174532925199433]"#, r#"UNIT["Grad",0.01570796326794897]"#)
+            .replace(r#""Pseudo_Standard_Parallel_1",78.5]"#, r#""Pseudo_Standard_Parallel_1",87.22222222222223]"#)
+            .replace(r#""Azimuth",30.28813975277778]"#, r#""Azimuth",33.65348861419753]"#)
+            .replace(r#""Longitude_Of_Center",24.83333333333333]"#, r#""Longitude_Of_Center",27.59259259259259]"#)
+            .replace(r#""Latitude_Of_Center",49.5]"#, r#""Latitude_Of_Center",55.0]"#)
+            .replace(r#""XY_Plane_Rotation",90.0]"#, r#""XY_Plane_Rotation",100.0]"#);
+        assert_eq!(grads.matches("Grad").count() + grads.matches("100.0]").count(), 2, "{grads}");
+        for wkt in [cols[5], grads.as_str()] {
+            let crs = crs_from_wkt(wkt).unwrap_or_else(|e| panic!("{e}: {wkt}"));
+            let ll = crs.transformer().unwrap().to_lonlat(xy).unwrap();
+            assert!(metres_apart(ll, lonlat) < 0.001, "{ll:?} is {} m off: {wkt}", metres_apart(ll, lonlat));
+        }
+        assert!(crs_from_wkt(&grads.replace(r#""XY_Plane_Rotation",100.0]"#, r#""XY_Plane_Rotation",101.0]"#)).is_err());
     }
 
     #[test]
