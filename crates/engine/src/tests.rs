@@ -33056,6 +33056,49 @@ fn shapefile_exports_say_which_field_names_they_changed() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Exporting to a Shapefile says how many vertices with a missing or infinite coordinate it left
+/// out, from a layer and from a standalone table; clean geometry gives no such notice (#1687).
+#[test]
+fn shapefile_exports_say_which_vertices_they_leave_out() {
+    use rustgis_data::{Dataset, Geometry, GeometryType};
+    use rustgis_geom::Coord;
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-shp-vertices-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    isolate_plugins();
+    let mut s = Session::new(Project::default());
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("missing or infinite")).map(|n| n.text.clone()).collect()
+    };
+    let stations = |name: &str, x: f64| {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![]);
+        let members = vec![Coord::new(0.0, 0.0), Coord::new(x, 1.0), Coord::new(2.0, 2.0), Coord::new(3.0, 3.0)];
+        ds.push(Some(Geometry::MultiPoint(members)), vec![]);
+        ds
+    };
+    let id = s.map_mut().add_layer(rustgis_map::Layer::new(0, stations("mp", f64::NAN)));
+    for ext in ["shp", "zip"] {
+        let out = dir.join(format!("mp.{ext}")).display().to_string();
+        let mark = s.notice_mark();
+        s.run("share.exportLayer", &json!({"layer": id, "path": out})).unwrap();
+        assert_eq!(
+            said(&s, mark),
+            [format!("{out}: 1 vertex with a missing or infinite coordinate was left out of the Shapefile")],
+            ".{ext}"
+        );
+    }
+    s.project.add_table(stations("Stations", f64::INFINITY));
+    let out = dir.join("stations.shp").display().to_string();
+    let mark = s.notice_mark();
+    s.run("share.exportTable", &json!({"table": "Stations", "path": out})).unwrap();
+    assert_eq!(said(&s, mark), [format!("{out}: 1 vertex with a missing or infinite coordinate was left out of the Shapefile")]);
+    // Clean geometry: no notice.
+    let clean = s.map_mut().add_layer(rustgis_map::Layer::new(0, stations("clean", 1.0)));
+    let mark = s.notice_mark();
+    s.run("share.exportLayer", &json!({"layer": clean, "path": dir.join("clean.shp")})).unwrap();
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn a_cancelled_tool_leaves_the_map_as_it_was_and_says_so_in_the_history() {
     let mut s = world();
