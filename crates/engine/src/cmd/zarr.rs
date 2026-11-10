@@ -262,13 +262,14 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
     Ok(())
 }
 
-/// Keep a typed WKT's compatibility choice with the decoded raster's other read notices.
+/// Keep a typed WKT's compatibility choice, or a shift it gives that isn't applied, with the decoded
+/// raster's other read notices.
 fn crs_lost(r: &mut raster::Raster, text: Option<&str>) {
     if let Some(text) = text
-        && let Some(note) = raster::wkt::projection_compatibility_note(text, r.crs)
-        && !r.lost.iter().any(|existing| existing == note)
+        && let Some(note) = raster::wkt::typed_crs_note(text, r.crs)
+        && !r.lost.contains(&note)
     {
-        r.lost.push(note.to_string());
+        r.lost.push(note);
     }
 }
 

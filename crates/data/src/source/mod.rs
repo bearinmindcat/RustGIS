@@ -843,6 +843,10 @@ pub(crate) fn gpkg_reproject(srs_id: i64, row: Option<GpkgSrs>, notes: &mut Vec<
                 crs.epsg()
             ));
         }
+        // A grid the definition gives isn't applied by the code either (#1678).
+        if let Some(note) = named.and_then(crate::raster::wkt::unapplied_note) {
+            notes.push(format!("its coordinate system (srs_id {srs_id}): {note}"));
+        }
         return Ok(Reproject::from_crs(crs, notes));
     }
     let what = format!("its coordinate system (srs_id {srs_id})");

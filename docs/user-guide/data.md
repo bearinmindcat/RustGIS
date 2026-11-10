@@ -114,7 +114,12 @@ or other WKT:
 - A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS`), or
   another without Helmert translations, isn't applied: the system is read without it, with a
   notice naming it and its grid file, as positions may be off by as much as that shift. A
-  `BOUNDCRS` without a transformation is refused, as in PROJ.
+  `BOUNDCRS` without a transformation, which PROJ refuses, is read as its source system, with a
+  notice.
+- The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
+  FileGDB's system, or a LAS file. WKT given as a command's `crs`, and a GeoPackage system read by
+  its EPSG code, say only that a transformation isn't applied. WKT in a Zarr store says none of
+  them for now.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that
   zone's.
 - Projected axes pointing west or south, as in South Africa's Lo grids, are read as such, or
