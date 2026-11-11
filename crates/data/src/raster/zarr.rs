@@ -1294,8 +1294,13 @@ pub fn assemble(store: &Store, plan: &Plan, chunks: &HashMap<String, Vec<u8>>, n
         dx = -dx;
     }
     let lonlat = geographic(yc) && geographic(xc);
-    let (crs, crs_note) =
-        if lonlat { (Some(Crs::LonLat), None) } else { crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note)) };
+    let (crs, crs_note) = if lonlat {
+        // The axes are read as longitude/latitude, whatever the WKT says; a shift it gives that
+        // isn't applied is still said.
+        (Some(Crs::LonLat), crs_of(store, a).and_then(|(_, note)| note))
+    } else {
+        crs_of(store, a).map_or((crs, None), |(crs, note)| (Some(crs), note))
+    };
     let Some(crs) = crs else {
         return Err(bad(format!("{}: the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)", a.path)));
     };
@@ -1429,9 +1434,10 @@ pub fn is_lonlat_grid(store: &Store, variable: &str) -> bool {
     geo(y) && geo(x)
 }
 
-/// The coordinate system `variable`'s attributes (or its grid mapping's) say, for a projected grid.
-pub fn grid_crs(store: &Store, variable: &str) -> Option<Crs> {
-    store.array(variable).and_then(|a| crs_of(store, a)).map(|(crs, _)| crs)
+/// The coordinate system `variable`'s attributes (or its grid mapping's) say, for a projected grid,
+/// with the note [`crs_of`] gives (a shift the WKT gives that isn't applied).
+pub fn grid_crs(store: &Store, variable: &str) -> Option<(Crs, Option<String>)> {
+    store.array(variable).and_then(|a| crs_of(store, a))
 }
 
 /// The stored (row, column) of `variable`'s map cell holding the point (`x`, `y`), in the grid's
@@ -2318,6 +2324,43 @@ mod tests {
             let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
             let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
             assert_eq!(r.crs, crs, "{attrs}");
+            assert_eq!(r.lost, lost, "{attrs}");
+            // The point series reads the same system, and the same note.
+            assert_eq!(grid_crs(&store, "elev"), Some((crs, lost.first().map(|n| n.to_string()))), "{attrs}");
+        }
+    }
+
+    /// A longitude/latitude store is read as such whatever its WKT says, and a shift the WKT gives
+    /// that isn't applied is said as on a projected grid; a clean WKT says nothing.
+    #[test]
+    fn a_lonlat_stores_wkt_says_a_grid_it_doesnt_apply() {
+        use crate::raster::wkt::tests::BOUND_BY_A_GRID;
+        let said = "the file's NTv2 transformation to WGS 84 (conus) isn't applied, so positions may be off by as much as that shift";
+        let coords = |dim: &str, n: usize| serde_json::json!({"zarr_format": 3, "node_type": "array", "shape": [n], "data_type": "float64", "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [n]}}, "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}], "fill_value": 0, "dimension_names": [dim]});
+        let bytes = |v: &[f64]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let chunks = HashMap::from([
+            ("elev/c/0/0".to_string(), [1i16, 2, 3, 4].iter().flat_map(|v| v.to_le_bytes()).collect()),
+            ("lat/c/0".to_string(), bytes(&[43.1, 43.0])),
+            ("lon/c/0".to_string(), bytes(&[-79.1, -79.0])),
+        ]);
+        for (attrs, lost) in [
+            (serde_json::json!({"crs_wkt": BOUND_BY_A_GRID}), vec![said]),
+            (serde_json::json!({"crs_wkt": "EPSG:4326"}), vec![]),
+        ] {
+            let elev = serde_json::json!({
+                "zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": "int16",
+                "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},
+                "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0, "dimension_names": ["lat", "lon"], "attributes": attrs
+            });
+            let root = serde_json::json!({"zarr_format": 3, "node_type": "group", "consolidated_metadata": {"kind": "inline", "metadata": {
+                "elev": elev, "lat": coords("lat", 2), "lon": coords("lon", 2),
+            }}});
+            let store = parse_store(&[("zarr.json".into(), root.to_string().into_bytes())]).unwrap();
+            let p = plan(&store, &Selection { variable: "elev".into(), index: vec![] }).unwrap();
+            let r = assemble(&store, &p, &chunks, "elev", None).unwrap();
+            assert_eq!(r.crs, Crs::LonLat, "{attrs}");
             assert_eq!(r.lost, lost, "{attrs}");
         }
     }

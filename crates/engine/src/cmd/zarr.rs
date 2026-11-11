@@ -1329,7 +1329,12 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
             (lon, lat)
         } else {
             let crs = match zarr::grid_crs(&store, &var) {
-                Some(c) => c,
+                Some((c, note)) => {
+                    if let Some(note) = note {
+                        s.warn(format!("crs: {note}"));
+                    }
+                    c
+                }
                 None => {
                     let given =
                         src.crs.as_deref().ok_or("the store doesn't say its coordinate system; give \"crs\" (such as EPSG:3035)")?;
