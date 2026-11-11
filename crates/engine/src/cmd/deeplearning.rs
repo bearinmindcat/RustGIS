@@ -1,5 +1,5 @@
-//! Analyze › Image Classification (Deep Learning Tools), Publish › Package (Deep Learning) and
-//! Analyze › Imagery Sharing (Create Hosted Imagery): neural-network pixel classification with models kept
+//! Imagery › Image Classification (Deep Learning Tools), Publish › Package (Deep Learning) and
+//! Imagery › Imagery Sharing (Create Hosted Imagery): neural-network pixel classification with models kept
 //! in the project and shared as packages, and rasters cut into web map tiles.
 
 use std::collections::HashMap;
@@ -35,6 +35,21 @@ pub struct DlModel {
     /// Epochs the last training ran (not saved).
     #[serde(skip)]
     pub epochs: usize,
+    /// What the last training left out to stay within the work limit of a run that can't be
+    /// cancelled ([`neural::Trained::limited`]), said when the model is kept (not saved).
+    #[serde(skip)]
+    pub limited: Option<String>,
+}
+
+impl DlModel {
+    /// Says what its training left out to stay within the work limit, if anything (AGENTS.md ›
+    /// Never silent), and puts it in the command's answer.
+    fn say_limited(&self, s: &mut Session, v: &mut Value) {
+        if let Some(what) = &self.limited {
+            s.warn(format!("{}: {what}", self.name));
+            v["limited"] = json!(what);
+        }
+    }
 }
 
 fn need_raster(s: &Session) -> Option<&'static str> {
@@ -47,16 +62,17 @@ fn need_model(s: &Session) -> Option<&'static str> {
 
 pub fn commands() -> Vec<C> {
     vec![
-        C::new("dl.train", "Train Deep Learning Model", "Analyze › Image Classification", |s, p| {
+        C::new("dl.train", "Train Deep Learning Model", "Imagery › Image Classification", |s, p| {
             let (m, unread) = train(s, p)?;
             unread.say(s);
             let mut r = json!({"model": m.name, "accuracy": m.accuracy, "classes": m.model.classes, "epochs": m.epochs});
+            m.say_limited(s, &mut r);
             r["replaced"] = json!(store(s, m));
             Ok(r)
         }).inputs(training_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_raster)
         .params(r#"{"layer": raster, "training": polygon layer, "classField": field naming each polygon's class, "bands"?: [1-based], "hidden"?: [units per hidden layer] (default [32, 16]), "epochs"?: 1..500 (default 60), "model"?: name}"#),
-        C::new("dl.classify", "Deep Learning Tools", "Analyze › Image Classification", classify).inputs(classify_inputs).roles(&[]).effects(crate::policy::Effects::NONE).when(need_raster).params(
+        C::new("dl.classify", "Deep Learning Tools", "Imagery › Image Classification", classify).inputs(classify_inputs).roles(&[]).effects(crate::policy::Effects::NONE).when(need_raster).params(
             r#"{"layer": raster, "model"?: a trained model's name, "training"?: polygon layer, "classField"?: field, "bands"?: [1-based], "hidden"?: [units], "epochs"?: 1..500 (without a model: train one first, as dl.train), "name"?: output, "ran"?: (internal: classes the app has worked out)}"#,
         ),
         C::new("dl.package", "Deep Learning Package", "Publish › Package", |s, p| {
@@ -68,7 +84,7 @@ pub fn commands() -> Vec<C> {
         .view()
         .when(need_model)
         .params(r#"{"model"?: name (default: the last trained), "path": "*.rgisdlpk"}"#),
-        C::new("dl.import", "Import Deep Learning Package", "Analyze › Image Classification", |s, p| {
+        C::new("dl.import", "Import Deep Learning Package", "Imagery › Image Classification", |s, p| {
             let bytes = read_bytes(p)?;
             // Only the model is inflated, whatever else the package holds.
             let entries = rustgis_data::zip::read_matching(&bytes, |n| n == "model.json")?;
@@ -94,14 +110,14 @@ pub fn commands() -> Vec<C> {
             Ok(json!({"model": name}))
         }).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files))
         .params(r#"{"path"?: "*.rgisdlpk", "data"?: base64}"#),
-        C::new("dl.remove", "Delete Model", "Analyze › Image Classification", |s, p| {
+        C::new("dl.remove", "Delete Model", "Imagery › Image Classification", |s, p| {
             let i = model_index(s, p)?;
             s.project.dl_models.remove(i);
             Ok(Value::Null)
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_model)
         .params(r#"{"model": name}"#),
-        C::new("imagery.hostedImagery", "Create Hosted Imagery", "Analyze › Imagery Sharing", hosted).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view().when(need_raster).params(
+        C::new("imagery.hostedImagery", "Create Hosted Imagery", "Imagery › Imagery Sharing", hosted).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).view().when(need_raster).params(
             r#"{"layer": raster, "path": "*.zip" (z/x/y.png tiles, tiles.json and a viewer page), "minZoom"?: 0..22, "maxZoom"?: 0..22 (default: the raster's resolution)}"#,
         ),
     ]
@@ -209,7 +225,8 @@ impl Training {
             return Err(format!("the class '{c}' has fewer than 5 pixels with data under its polygons"));
         }
         let t = neural::train(bands, classes, &samples, hidden, epochs)?;
-        Ok(DlModel { name, model: t.model, accuracy: t.accuracy, epochs: t.epochs })
+        let limited = t.limited();
+        Ok(DlModel { name, model: t.model, accuracy: t.accuracy, epochs: t.epochs, limited })
     }
 }
 
@@ -265,7 +282,16 @@ fn training(s: &Session, p: &Value) -> Result<Training, String> {
         Some(a) => a.iter().filter_map(Value::as_u64).map(|u| u as usize).take(neural::MAX_LAYERS).collect(),
         None => vec![32, 16],
     };
-    let epochs = f(p, "epochs").unwrap_or(60.0).clamp(1.0, neural::MAX_EPOCHS as f64) as usize;
+    // A count given that isn't a whole number from 1 to 500 is refused, not cut to one or left
+    // for the default: the training would say nothing of the epochs left out.
+    let epochs = match p.get("epochs").filter(|v| !v.is_null()) {
+        None => 60.0,
+        // Read as other counts are (a numeric string too), then checked.
+        Some(v) => f(p, "epochs")
+            .filter(|e| (1.0..=neural::MAX_EPOCHS as f64).contains(e) && e.fract() == 0.0)
+            .ok_or_else(|| format!("epochs is 1 to {}, not {v}", neural::MAX_EPOCHS))?,
+    };
+    let epochs = epochs as usize;
     // Without a name given, a new model never replaces one: it gets a name of its own.
     let (name, auto) = match ps(p, "model") {
         Some(_) => (name(&json!({"name": p.get("model")}), format!("{}_model", r.name)), None),
@@ -342,6 +368,7 @@ pub(crate) fn classify_work(s: &Session, p: &Value) -> Result<super::workflows::
                     m.name = free_name(s, &base);
                     v["model"] = json!(m.name);
                 }
+                m.say_limited(s, v);
                 v["replaced"] = json!(store(s, m));
             }) as super::workflows::Then
         });

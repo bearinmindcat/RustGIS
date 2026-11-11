@@ -216,6 +216,126 @@ fn plugin_tool_and_parameter_limits_stay_bounded() {
     assert!(e.contains("more than 32 parameters"), "{e}");
 }
 
+/// A command's dialog fields are checked like a tool's parameters, take raster layers, and
+/// refuse files; a command without one still parses.
+#[test]
+fn command_dialog_fields_are_checked() {
+    let mut m = json!({"id": "dialogs", "name": "Dialogs", "version": "1.0.0", "permissions": ["files"],
+        "commands": [{"id": "classify", "label": "Classify", "form": [
+            {"name": "image", "label": "Image", "kind": "rasterLayer", "required": true},
+            {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+            {"name": "field", "label": "Class field", "kind": "field", "default": "class"},
+            {"name": "method", "label": "Method", "kind": "choice", "choices": ["Random Forest", "Minimum distance"]},
+            {"name": "trees", "label": "Trees", "kind": "number", "default": 50}
+        ]}, {"id": "plain", "label": "Plain"}]});
+    let parsed = Manifest::parse(&m.to_string()).unwrap();
+    assert_eq!(parsed.commands[0].form.len(), 5);
+    assert!(parsed.commands[1].form.is_empty());
+    m["commands"][0]["form"][1]["kind"] = json!("file");
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'file'"), "{e}");
+    m["commands"][0]["form"][1] = json!({"name": "image", "label": "Again", "kind": "text"});
+    let e = Manifest::parse(&m.to_string()).unwrap_err();
+    assert!(e.contains("parameter 'image' is invalid or repeated"), "{e}");
+    // Tools still refuse raster layers: they get features, not rasters.
+    let tool = json!({"id": "t", "name": "Tool", "version": "1.0.0",
+        "tools": [{"id": "t", "name": "Tool", "params": [{"name": "image", "label": "Image", "kind": "rasterLayer"}]}]});
+    let e = Manifest::parse(&tool.to_string()).unwrap_err();
+    assert!(e.contains("unknown parameter kind 'rasterLayer'"), "{e}");
+    // A dialog field's default must be one it can show, or the plugin is refused, naming it;
+    // a number written as text is a number.
+    m["commands"][0]["form"][1] = json!({"name": "samples", "label": "Samples", "kind": "polygonLayer"});
+    m["commands"][0]["form"][4]["default"] = json!("50");
+    assert!(Manifest::parse(&m.to_string()).is_ok());
+    // An integer past i64, as text or as a number, would be rounded or dropped: refused like
+    // other wrong defaults.
+    for (i, wrong) in [
+        (4, json!("many")),
+        (2, json!(5)),
+        (4, json!(true)),
+        (4, json!("99999999999999999999")),
+        (4, json!(u64::MAX)),
+        (4, json!("9007199254740993.0")),
+    ] {
+        let mut m = m.clone();
+        m["commands"][0]["form"][i]["default"] = wrong;
+        let e = Manifest::parse(&m.to_string()).unwrap_err();
+        assert!(e.contains("default") && e.contains("Classify"), "{e}");
+    }
+    let mut s = m.clone();
+    s["commands"][0]["form"].as_array_mut().unwrap().push(json!({"name": "save", "label": "Save", "kind": "bool", "default": "yes"}));
+    let e = Manifest::parse(&s.to_string()).unwrap_err();
+    assert!(e.contains("'save' has a default of another kind"), "{e}");
+    // A choice's default is one of its choices.
+    let mut c = m.clone();
+    c["commands"][0]["form"][3]["default"] = json!("Maximum likelihood");
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'method' has a default of another kind"), "{e}");
+    // A field lists the fields of a vector layer picked above it: none, or a field that may pick
+    // a raster, is refused.
+    for form in [
+        json!([{"name": "col", "label": "Column", "kind": "field", "required": true}]),
+        json!([{"name": "image", "label": "Image", "kind": "rasterLayer"}, {"name": "col", "label": "Column", "kind": "numericField"}]),
+        // `layer` takes rasters too.
+        json!([{"name": "any", "label": "Any", "kind": "layer"}, {"name": "col", "label": "Column", "kind": "field", "required": true}]),
+    ] {
+        let mut c = m.clone();
+        c["commands"][0]["form"] = form;
+        let e = Manifest::parse(&c.to_string()).unwrap_err();
+        assert!(e.contains("'col' lists the fields of a layer"), "{e}");
+    }
+    // A required field lists those of a layer that must be picked too.
+    let mut c = m.clone();
+    c["commands"][0]["form"] = json!([
+        {"name": "samples", "label": "Samples", "kind": "polygonLayer"},
+        {"name": "col", "label": "Column", "kind": "field", "required": true}
+    ]);
+    let e = Manifest::parse(&c.to_string()).unwrap_err();
+    assert!(e.contains("'col' is required, so the layer field above it must be too"), "{e}");
+    c["commands"][0]["form"][0]["required"] = json!(true);
+    assert!(Manifest::parse(&c.to_string()).is_ok());
+}
+
+/// A command may ask for more time than the two minutes a command normally gets.
+#[test]
+fn command_timeouts_are_bounded() {
+    let manifest = |timeout: Value| {
+        json!({"id": "timed", "name": "Timed", "version": "1.0.0",
+            "commands": [{"id": "c", "label": "C", "timeout": timeout}]})
+    };
+    let m = Manifest::parse(&manifest(json!(600)).to_string()).unwrap();
+    assert_eq!(m.commands[0].timeout, Some(600));
+    assert_eq!(Manifest::parse(&manifest(Value::Null).to_string()).unwrap().commands[0].timeout, None);
+    let e = Manifest::parse(&manifest(json!(0)).to_string()).unwrap_err();
+    assert!(e.contains("timeout of 0 seconds"), "{e}");
+    let e = Manifest::parse(&manifest(json!(86_401)).to_string()).unwrap_err();
+    assert!(e.contains("timeout of 86401 seconds"), "{e}");
+}
+
+/// A WebAssembly command's host requests are refused once its time limit has passed.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn wasm_host_requests_stop_at_the_time_limit() {
+    struct Slow(u32);
+    impl Host for Slow {
+        fn call(&mut self, _: &str, _: &Value) -> Result<Value, String> {
+            self.0 += 1;
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(json!(1))
+        }
+    }
+    let mut host = Slow(0);
+    // The limit is far off for the first request, so no scheduling delay can end it early; the
+    // deadline then passes before the second.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut timed = crate::Timed { host: &mut host, deadline };
+    assert!(timed.call("a", &json!({})).is_ok());
+    timed.deadline = std::time::Instant::now();
+    let e = timed.call("b", &json!({})).unwrap_err();
+    assert!(e.contains("too long"), "{e}");
+    assert_eq!(host.0, 1, "the request after the limit never reached the host");
+}
+
 /// Enabled plugin tools register with geoprocessing and return layers or selections.
 #[test]
 fn tools_join_the_geoprocessing_tools() {
@@ -676,7 +796,7 @@ fn plugin_panels_are_checked() {
             "1 to 32 items",
         ),
         (json!({"title": "P", "state": "nope", "items": [{"kind": "button", "command": "h"}]}), "state command"),
-        (item(json!({"kind": "dial", "id": "d"})), "isn't text, checkbox, slider, button, tree, choice, date, range or pick"),
+        (item(json!({"kind": "dial", "id": "d"})), "isn't text, checkbox, slider, button, tree, form, choice, date, range or pick"),
         (item(json!({"kind": "pick", "id": "p"})), "needs a label or a command"),
         (item(json!({"kind": "pick", "label": "P"})), "invalid or repeated"),
         (item(json!({"kind": "pick", "id": "p", "command": "zz"})), "isn't one of the plugin's commands"),
@@ -1055,6 +1175,117 @@ fn hostile_panel_trees_are_tamed() {
     assert!(Manifest::parse(&m.to_string()).unwrap_err().contains("dates have a default"));
 }
 
+/// A tree holds [`MAX_TREE_NODES`](crate::panel::MAX_TREE_NODES) nodes, a country's
+/// municipalities with the levels above them (#1546). Past them, at any depth, it is cut, and the
+/// cut is said once, naming the tree and how many nodes it was given, apart from the nodes left
+/// out for other reasons; the panel's state keeps it for a note under the tree.
+#[test]
+fn a_tree_cut_at_its_limit_says_so() {
+    use crate::PanelState;
+    use crate::panel::{MAX_TREE_NODES, TreeNode};
+    fn count(n: &[TreeNode]) -> usize {
+        n.iter().map(|n| 1 + count(&n.children)).sum()
+    }
+    let flat = |n: usize| -> Vec<Value> { (0..n).map(|i| json!({"id": i.to_string()})).collect() };
+    let decl = tree_panel();
+    let mut st = PanelState::new(&decl);
+    let full = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES)}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES, "all of them kept");
+    assert_eq!(full.notice(), None, "and nothing said");
+    assert_eq!(st.items["catalogue"].cut, None);
+
+    let over = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES + 1)}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES, "the first ones kept");
+    assert_eq!(over.cut, [("catalogue".to_string(), MAX_TREE_NODES + 1)]);
+    assert_eq!(over.nodes, 0, "not counted again among the nodes left out");
+    let notice = over.notice().unwrap();
+    assert_eq!(notice.matches("catalogue").count(), 1, "{notice}");
+    assert!(notice.contains(&format!("{} nodes", MAX_TREE_NODES + 1)) && notice.contains(&format!("first {MAX_TREE_NODES}")), "{notice}");
+    assert_eq!(st.items["catalogue"].cut, Some(MAX_TREE_NODES + 1));
+    assert_eq!(serde_json::to_value(&st.items["catalogue"]).unwrap()["cut"], MAX_TREE_NODES + 1);
+
+    // Nested, as regions and their municipalities: the last ones of a branch are cut, and the
+    // branches after it with what they hold. A node without an id is left out for that.
+    let tail: Vec<Value> = (0..MAX_TREE_NODES - 1).map(|i| json!({"id": format!("m{i}")})).collect();
+    let nested = json!([
+        {"label": "no id", "children": [{"id": "z"}]},
+        {"id": "north", "children": tail.into_iter().chain([json!({"id": "past"})]).collect::<Vec<_>>()},
+        {"id": "south", "children": [{"id": "s1"}, {"id": "s2"}]},
+        {"id": "west", "children": [{"id": "w1", "children": [{"id": "w2"}]}]},
+    ]);
+    let given = 2 + MAX_TREE_NODES + 1 + 3 + 3;
+    let over = st.apply(&decl, &json!({"items": {"catalogue": {"nodes": nested}}}));
+    assert_eq!(count(&st.items["catalogue"].nodes), MAX_TREE_NODES);
+    assert_eq!(over.cut, [("catalogue".to_string(), given)]);
+    assert_eq!(over.nodes, 2, "the node without an id and its child");
+    assert_eq!(st.items["catalogue"].cut, Some(given));
+
+    // Two trees cut in one answer: one part, with the count and each tree.
+    let mut m: Value = serde_json::from_str(&testing::panel_manifest("tree-panel")).unwrap();
+    for id in ["catalogue", "places"] {
+        m["panel"]["items"].as_array_mut().unwrap().push(json!({"kind": "tree", "id": id, "label": id, "command": "q"}));
+    }
+    let two = Manifest::parse(&m.to_string()).unwrap().panel.unwrap();
+    let mut both = PanelState::new(&two);
+    let over = both
+        .apply(&two, &json!({"items": {"catalogue": {"nodes": flat(MAX_TREE_NODES + 1)}, "places": {"nodes": flat(MAX_TREE_NODES + 2)}}}));
+    let notice = over.notice().unwrap();
+    assert_eq!(notice.matches("tree(s) cut").count(), 1, "{notice}");
+    assert!(notice.contains(&format!("2 tree(s) cut: only the first {MAX_TREE_NODES} nodes")), "{notice}");
+    assert!(
+        notice.contains(&format!("catalogue ({} nodes given)", MAX_TREE_NODES + 1))
+            && notice.contains(&format!("places ({} nodes given)", MAX_TREE_NODES + 2)),
+        "{notice}"
+    );
+
+    // Fewer again: no cut left to say.
+    assert_eq!(st.apply(&decl, &json!({"items": {"catalogue": {"nodes": flat(3)}}})).notice(), None);
+    assert_eq!(st.items["catalogue"].cut, None);
+    assert!(serde_json::to_value(&st.items["catalogue"]).unwrap().get("cut").is_none());
+
+    // A dropdown's options past its limit are still in the generic count: only a tree's cut is
+    // said apart.
+    let decl = choice_date_range_panel();
+    let mut st = PanelState::new(&decl);
+    let options: Vec<Value> = (0..=crate::panel::MAX_CHOICES).map(|i| json!({"id": i.to_string()})).collect();
+    let over = st.apply(&decl, &json!({"items": {"product": {"options": options}}}));
+    assert_eq!(st.items["product"].nodes.len(), crate::panel::MAX_CHOICES);
+    assert!(over.cut.is_empty() && st.items["product"].cut.is_none());
+    let notice = over.notice().unwrap();
+    assert!(notice.contains("1 option(s) or tree node(s) left out") && notice.contains("past a dropdown's limit"), "{notice}");
+}
+
+/// A node's label is folded (lower case, accents aside) once, when the node comes: a search,
+/// which runs every frame it is typed, compares against that and folds no label (#1546).
+#[test]
+fn a_tree_search_reads_the_label_folded_once() {
+    use crate::PanelState;
+    use crate::panel::TreeNode;
+    let words = |q: &str| TreeNode::fold(q).split_whitespace().map(String::from).collect::<Vec<_>>();
+    let mut node = TreeNode::new("3547809".into(), "Santo André – São Paulo".into(), None, Vec::new());
+    assert_eq!(node.folded, "santo andre – sao paulo");
+    assert!(node.holds_words(&words("SÃO andre")));
+    assert!(node.holds_words(&[]), "no words: every node");
+    assert!(!node.holds_words(&words("são josé")));
+    // What it compares is what was stored, not the label folded again.
+    node.folded = "outro".into();
+    assert!(node.holds_words(&words("outro")) && !node.holds_words(&words("santo")));
+    // From a plugin's answer, the label, or the id standing for it, is folded as it is kept.
+    let decl = tree_panel();
+    let mut st = PanelState::new(&decl);
+    st.apply(
+        &decl,
+        &json!({"items": {"catalogue": {"nodes": [
+            {"id": "a", "label": "A\u{301}rvore"},
+            {"id": "Içá"},
+            {"id": "two", "label": "Água\nRíos"},
+        ]}}}),
+    );
+    let folded: Vec<&str> = st.items["catalogue"].nodes.iter().map(|n| n.folded.as_str()).collect();
+    assert_eq!(folded, ["arvore", "ica", "agua rios"]);
+    assert_eq!(TreeNode::fold("Ñandú Çà Åland İzmir"), "nandu ca aland izmir");
+}
+
 #[test]
 fn registry_entries_say_how_a_plugin_runs() {
     use crate::manifest::Runtime;
@@ -1163,6 +1394,48 @@ fn file_parameters_need_files_and_hand_tools_the_file() {
     let at = |n: usize| json!({"model": {"name": "big.nc", "data": b64.encode(vec![0u8; n])}});
     assert!(crate::tools::request(decl, &at(max), Default::default()).is_ok());
     assert!(crate::tools::request(decl, &at(max + 1), Default::default()).unwrap_err().contains("larger"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn path_mode_file_parameters_hand_process_tools_the_path_unread() {
+    let wasm: Value = serde_json::from_str(&testing::manifest("path-param", &["files"])).unwrap();
+    let mut m: Value = serde_json::from_str(&testing::process_manifest("path-param", &["files"], &["prog".into()])).unwrap();
+    // Only a process plugin's file parameter takes `path`, and the mode must be one RustGIS knows.
+    let mut bad = wasm.clone();
+    bad["tools"][2]["params"][1]["mode"] = json!("path");
+    assert!(Manifest::parse(&bad.to_string()).unwrap_err().contains("mode 'path'"));
+    let mut bad = m.clone();
+    bad["tools"][2]["params"][0]["mode"] = json!("path");
+    assert!(Manifest::parse(&bad.to_string()).unwrap_err().contains("mode 'path'"));
+    let mut bad = m.clone();
+    bad["tools"][2]["params"][1]["mode"] = json!("folder");
+    assert!(Manifest::parse(&bad.to_string()).is_err());
+    m["tools"][2]["params"][1]["mode"] = json!("path");
+    let parsed = Manifest::parse(&m.to_string()).unwrap();
+    let decl = parsed.tools.iter().find(|t| t.id == "r").unwrap();
+
+    // A file over the contents limit goes as its full path, unread, with no `files`.
+    let dir = std::env::temp_dir().join(format!("rustgis-test-path-param-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("tile.las");
+    std::fs::File::create(&path).unwrap().set_len(crate::tools::MAX_FILE as u64 + 1).unwrap();
+    let r = crate::tools::request(decl, &json!({"model": path.display().to_string()}), Default::default()).unwrap();
+    assert_eq!(r["params"]["model"], path.display().to_string());
+    assert!(r.get("files").is_none());
+    // A relative path is made full: the plugin's program runs in its own folder. (Tests run in
+    // the crate's folder.)
+    let r = crate::tools::request(decl, &json!({"model": "Cargo.toml"}), Default::default()).unwrap();
+    assert_eq!(r["params"]["model"], std::env::current_dir().unwrap().join("Cargo.toml").display().to_string());
+    // A missing file, a folder, file contents or a non-text value is an error.
+    for bad in [
+        json!(dir.join("missing.las").display().to_string()),
+        json!(dir.display().to_string()),
+        json!({"name": "a.las", "data": ""}),
+        json!(7),
+    ] {
+        assert!(crate::tools::request(decl, &json!({"model": bad}), Default::default()).is_err(), "{bad}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

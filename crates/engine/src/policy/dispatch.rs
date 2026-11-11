@@ -142,12 +142,21 @@ impl Session {
     fn capture_read(&mut self, command: &str, params: &Value) -> Result<crate::cmd::reads::ReadAhead, String> {
         if !matches!(
             command,
-            "layer.addData" | "layer.loadAll" | "layer.reloadData" | "model.run" | "script.run" | "map.reloadTiles" | "map.repairTiles"
+            "layer.addData"
+                | "layer.loadAll"
+                | "layer.reloadData"
+                | "labels.convert"
+                | "model.run"
+                | "script.run"
+                | "map.reloadTiles"
+                | "map.repairTiles"
+                | "topology.validate"
+                | "source.syncState"
         ) {
-            return Err("only Add Data, Load All, Reload Data, models, scripts and local tile archives can prepare background work".into());
+            return Err("only Add Data, Load All, Reload Data, Convert To Annotation, models, scripts, tile archives, topology and Source File State prepare background work".into());
         }
         let mut params = params.as_object().cloned().ok_or("read parameters must be an object")?;
-        if matches!(command, "layer.loadAll" | "layer.reloadData") {
+        if matches!(command, "layer.loadAll" | "layer.reloadData" | "labels.convert" | "source.syncState") {
             let id = self.layer_id(&Value::Object(params.clone()))?;
             params.insert("layer".into(), json!(id));
         }
@@ -681,6 +690,20 @@ impl Session {
     }
     /// Resolves the command once or retrieves a restricted owner-only completion token.
     pub(crate) fn authorize(&mut self, id: &str, params: &Value) -> Result<Authorized<CommandOp>, String> {
+        // Every way in (a background raster or export, a read ahead, a completion) refuses a
+        // command of an extension that is off, as `Session::run` does: the one asked for, and
+        // the one a completion finishes.
+        if let Some(why) = self.extensions().blocks(id) {
+            return Err(why);
+        }
+        let op = self.authorize_unchecked(id, params)?;
+        if let Some(why) = self.extensions().blocks(op.node.id()) {
+            return Err(why);
+        }
+        Ok(op)
+    }
+    /// [`Self::authorize`] before the extension check.
+    fn authorize_unchecked(&mut self, id: &str, params: &Value) -> Result<Authorized<CommandOp>, String> {
         if let Some(id_of_run) = params.get("ran").and_then(Value::as_u64)
             && let Some(c) = self.raster_results.iter().find(|(n, _)| *n == id_of_run).and_then(|(_, m)| m.continuation.clone())
         {
@@ -818,6 +841,12 @@ impl Session {
             .ok_or("no pending raster with that id")?;
         if !self.policy.scopes.is_empty() {
             self.continuation_owner(&c)?;
+        }
+        // A run whose extension was turned off while it ran is never finished: its raster is
+        // let go here rather than kept to no end.
+        if let Some(why) = self.extensions().blocks(c.node.id()) {
+            self.raster_results.retain(|(n, _)| *n != id);
+            return Err(why);
         }
         let mut params = params.clone();
         params.as_object_mut().ok_or("raster completion parameters must be an object")?.insert("ran".into(), json!(id));
