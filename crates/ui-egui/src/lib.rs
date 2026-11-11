@@ -4002,6 +4002,7 @@ impl RustGisApp {
                 if ext == "zip" {
                     dbf_notes.extend(io::shapefile_names_note(&ds.fields, &name));
                     dbf_notes.extend(io::shapefile_values_notes(ds, &name));
+                    dbf_notes.extend(io::shapefile_geometry_notes(ds, &name, crs));
                 }
                 if matches!(ext.as_str(), "parquet" | "geoparquet") {
                     dbf_notes.extend(rustgis_engine::data::source::parquet::values_note(ds, &name));
@@ -5700,6 +5701,8 @@ const DEFAULTS_TO_ACTIVE_LAYER: &[&str] = &[
     "data.similar",
     "layer.geocode",
     "layer.repairSource",
+    // Enabled only while No Fill is on, which the sample has on no layer.
+    "layer.restoreFill",
     "layer.reloadData",
     "report.new",
     "report.open",
