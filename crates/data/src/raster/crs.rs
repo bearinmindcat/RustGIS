@@ -597,8 +597,8 @@ impl WorldProjection {
     /// The projection a PROJ definition describes when it is `+proj=natearth`, `wintri` or
     /// `eck4`: `None` for any other; an error for one it can't compute (axes other than east and
     /// north, `+over`, a scale other than 1, a standard parallel that isn't a latitude short of a
-    /// pole). Winkel Tripel's parallel is `+lat_1`, else Winkel's own
-    /// ([`rustgis_geom::world::winkel_parallel`]), as the map draws it.
+    /// pole). Winkel Tripel's parallel is `+lat_1`, else 0, as PROJ 9.8.1 takes it (the map's
+    /// preset gives Winkel's own, [`rustgis_geom::world::winkel_parallel`]).
     fn from_proj4(def: &str) -> Option<Result<WorldProjection, String>> {
         use rustgis_geom::world::Kind as W;
         let tokens: Vec<(&str, &str)> =
@@ -620,7 +620,7 @@ impl WorldProjection {
                     .ok()
                     .filter(|v| v.is_finite() && v.abs() < 90.0)
                     .ok_or_else(|| format!("+lat_1={v} isn't a latitude short of a pole"))?,
-                None => rustgis_geom::world::winkel_parallel(),
+                None => 0.0,
             };
             // proj4rs reads what every projection shares (centre, offsets, unit, axes, datum) from
             // the same definition with a projection it has, the equidistant cylindrical, in place.
@@ -748,6 +748,12 @@ impl Transformer {
     /// Whether the raster's own coordinates are longitude/latitude degrees.
     pub fn is_geographic(&self) -> bool {
         matches!(self.kind, Kind::LonLat | Kind::Proj { geographic: true, .. })
+    }
+
+    /// Whether its projection is a world projection RustGIS computes (Natural Earth, Winkel
+    /// Tripel, Eckert IV), whose outline is widest at the equator (#1701).
+    pub(super) fn is_world_projection(&self) -> bool {
+        matches!(self.kind, Kind::World { .. })
     }
 
     /// Web Mercator to native coordinates (the renderer's direction).

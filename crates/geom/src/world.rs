@@ -44,9 +44,8 @@ impl Kind {
 }
 
 /// Winkel's own standard parallel for his Tripel, acos(2/π) (about 50.46°, degrees): the one the
-/// map draws a Winkel Tripel without one in, and RustGIS writes for it. PROJ 9.8.1 takes 0 for a
-/// definition without `+lat_1`; GDAL and PROJ always write the parallel in WKT, so a file says
-/// which.
+/// map's Winkel Tripel preset gives as its `+lat_1`. A definition or WKT without one is at 0, as
+/// PROJ 9.8.1 takes it; GDAL and PROJ always write the parallel in WKT, so a file says which.
 pub fn winkel_parallel() -> f64 {
     std::f64::consts::FRAC_2_PI.acos().to_degrees()
 }
@@ -165,8 +164,8 @@ pub struct World {
     /// False easting and northing, metres.
     pub x0: f64,
     pub y0: f64,
-    /// Winkel Tripel's standard parallel, degrees ([`winkel_parallel`] unless a definition gives
-    /// one); the other projections have none.
+    /// Winkel Tripel's standard parallel, degrees (a definition's `+lat_1`, 0 without one, as in
+    /// PROJ); the other projections have none.
     pub lat1: f64,
 }
 
@@ -227,7 +226,10 @@ impl World {
         if (fx - tx).abs() + (fy - ty).abs() > 1e-9 {
             return None;
         }
-        let lon = (lam.to_degrees() + self.lon0 + 540.0).rem_euclid(360.0) - 180.0;
+        // Within ±180° as PROJ gives it, as `Sinusoidal` and `Eqc` do: a whole world's east edge
+        // is 180°, not -180° (a rounding error past it too, as in `forward`).
+        let lon = lam.to_degrees() + self.lon0;
+        let lon = if lon.abs() <= 180.0 + 1e-9 { lon.clamp(-180.0, 180.0) } else { (lon + 540.0).rem_euclid(360.0) - 180.0 };
         Some(Coord::new(lon, phi.to_degrees()))
     }
 }
@@ -254,6 +256,13 @@ mod tests {
                 let corner = Coord::new(w.x0 + 0.99 * (e.x - w.x0), w.y0 + 0.99 * (n.y - w.y0));
                 assert!(w.inverse(corner).is_none(), "{w:?} corner");
                 assert!(w.inverse(Coord::new(f64::NAN, 0.0)).is_none());
+            }
+            // The edges come back on their own side, as PROJ gives them: centred on 0°, the east
+            // edge is 180° and the west -180°; centred on 30°, both are -150° (#1701).
+            for (lon0, east, west) in [(0.0, 180.0, -180.0), (30.0, -150.0, -150.0)] {
+                let w = World::new(kind, lon0, MERCATOR_R);
+                let edge = |dir: f64| w.inverse(w.forward(Coord::new(lon0 + dir * 180.0, 0.0)).unwrap()).unwrap().x;
+                assert!((edge(1.0) - east).abs() < 1e-9 && (edge(-1.0) - west).abs() < 1e-9, "{w:?}: {} {}", edge(1.0), edge(-1.0));
             }
         }
         // Robinson's published scale: the equator is 0.8487·2πR long.

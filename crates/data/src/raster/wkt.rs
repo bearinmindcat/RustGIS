@@ -1353,10 +1353,20 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         "ROBINSON" => format!("+proj=robin {at}"),
         // Computed by RustGIS too (`rustgis_geom::world`), on a sphere of the semi-major axis as in
         // PROJ (#1701). Winkel Tripel's standard parallel is the file's (GDAL and PROJ always
-        // write one), else Winkel's own, as RustGIS draws and writes it.
+        // write one), else 0, as PROJ reads WKT without one. A parameter that isn't a finite
+        // number (`1e400`, which `parameters` leaves out) is refused rather than taken as not
+        // given, as for Web Mercator: a parallel given so would be read as 0.
+        "NATURAL_EARTH" | "ECKERT_IV" | "WINKEL_TRIPEL"
+            if p.nodes().any(|n| n.name.eq_ignore_ascii_case("PARAMETER") && n.num(0).is_none()) =>
+        {
+            return Err(format!(
+                "the {} projection with a parameter that isn't a finite number isn't supported",
+                p.child("PROJECTION").map_or("", Node::title)
+            ));
+        }
         "NATURAL_EARTH" => format!("+proj=natearth {at}"),
         "ECKERT_IV" => format!("+proj=eck4 {at}"),
-        "WINKEL_TRIPEL" => format!("+proj=wintri +lat_1={} {at}", lat1.unwrap_or_else(rustgis_geom::world::winkel_parallel)),
+        "WINKEL_TRIPEL" => format!("+proj=wintri +lat_1={} {at}", lat1.unwrap_or(0.0)),
         // EPSG's method 9840, on the ellipsoid (proj4rs follows the EPSG Guidance Note 7-2). Esri's
         // Orthographic is a spherical one: on a sphere they agree, on an ellipsoid they don't, and
         // which one an Esri file means can't be told, so that is refused rather than guessed.
@@ -1937,11 +1947,10 @@ fn def_wkt(def: &str, name: &str, code: Option<u16>) -> Option<String> {
             ps = vec![("central_meridian", lon0)];
             "Eckert_IV"
         }
-        // Its standard parallel is the definition's, else Winkel's own of acos(2/π) (about
-        // 50.46°), the one the map draws a definition without one in. PROJ 9.8.1 takes 0 there,
-        // so it is always written.
+        // Its standard parallel is the definition's, else 0, as PROJ 9.8.1 takes and writes it
+        // (the map's preset gives Winkel's own, acos(2/π), about 50.46°).
         "wintri" => {
-            let lat1 = get("lat_1").unwrap_or_else(rustgis_geom::world::winkel_parallel);
+            let lat1 = get("lat_1").unwrap_or(0.0);
             ps = vec![("standard_parallel_1", lat1), ("central_meridian", lon0)];
             "Winkel_Tripel"
         }
@@ -2131,8 +2140,12 @@ pub(crate) mod tests {
             assert!(wkt.contains("PARAMETER[\"central_meridian\",-60]") && wkt.contains("PARAMETER[\"false_easting\",100]"), "{wkt}");
             assert!(wkt.contains("SPHEROID[\"WGS 84\",6378137,298.257223563"), "{wkt}");
         }
+        // Winkel Tripel's standard parallel: the definition's (the map's preset gives Winkel's
+        // own), else 0, as PROJ 9.8.1 writes a definition without one.
+        let wkt = proj4_to_wkt("+proj=wintri +lon_0=0 +lat_1=50.459776252189805 +datum=WGS84 +units=m +no_defs", "W").unwrap();
+        assert!(wkt.contains("PARAMETER[\"standard_parallel_1\",50.459776252189805]"), "{wkt}");
         let wkt = proj4_to_wkt("+proj=wintri +lon_0=0 +datum=WGS84 +units=m +no_defs", "W").unwrap();
-        assert!(wkt.contains("PARAMETER[\"standard_parallel_1\",50.4597"), "{wkt}");
+        assert!(wkt.contains("PARAMETER[\"standard_parallel_1\",0]"), "{wkt}");
         // Another projection proj4rs can't read still has none.
         assert_eq!(proj4_to_wkt("+proj=nosuch +datum=WGS84 +units=m +no_defs", "X"), None);
     }
@@ -2196,10 +2209,20 @@ pub(crate) mod tests {
             let crs = crate::filegdb::crs_of_code(code).unwrap_or_else(|| panic!("ESRI:{code}"));
             places(crs, &format!("ESRI:{code}"), &points);
         }
-        // The presets' WKT reads back to the presets: Winkel Tripel at Winkel's own parallel.
+        // A Winkel Tripel without a standard parallel is at 0, as PROJ 9.8.1 takes it: its
+        // definition, WKT1 without the parameter, and the WKT written from the definition.
+        let bare = "+proj=wintri +lon_0=-60 +x_0=100 +y_0=-200 +datum=WGS84 +units=m +no_defs";
+        let at_0 = [((10.0, 50.0), (6707316.7995641865, 5703113.4871610105)), ((-120.0, -35.0), (-6238480.310135213, -3978189.6516721374))];
+        places(Crs::parse(bare).unwrap(), bare, &at_0);
+        let no_parallel = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
+        places(crs_from_wkt(no_parallel).unwrap(), no_parallel, &at_0);
+        let written = proj4_to_wkt(bare, "W").unwrap();
+        places(crs_from_wkt(&written).unwrap(), &written, &at_0);
+        // The presets' WKT reads back to the presets: Winkel Tripel at Winkel's own parallel,
+        // which its preset gives.
         for def in [
             "+proj=natearth +lon_0=0 +datum=WGS84 +units=m +no_defs",
-            "+proj=wintri +lon_0=0 +datum=WGS84 +units=m +no_defs",
+            "+proj=wintri +lon_0=0 +lat_1=50.459776252189805 +datum=WGS84 +units=m +no_defs",
             "+proj=eck4 +lon_0=0 +datum=WGS84 +units=m +no_defs",
         ] {
             let back = crs_from_wkt(&proj4_to_wkt(def, "World").unwrap()).unwrap().transformer().unwrap();
@@ -2215,6 +2238,26 @@ pub(crate) mod tests {
         assert_eq!(crs_from_wkt(&wkt1.replace(r#"AXIS["Easting",EAST]"#, r#"AXIS["Easting",WEST]"#)), Err(REVERSED_AXES.into()));
         let wintri = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["standard_parallel_1",40],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
         assert!(crs_from_wkt(&wintri.replace(r#""standard_parallel_1",40"#, r#""standard_parallel_1",90"#)).is_err());
+    }
+
+    /// A world projection's parameter that isn't a finite number (`1e400`, which the reader
+    /// leaves out) isn't taken as not given, a parallel of 0 or a centre of 0°, in WKT1 and WKT2
+    /// (#1701).
+    #[test]
+    fn world_projections_refuse_a_parameter_that_isnt_a_number() {
+        let wintri = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["standard_parallel_1",40],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
+        let natearth = wintri.replace("Winkel_Tripel", "Natural_Earth").replace(r#"PARAMETER["standard_parallel_1",40],"#, "");
+        assert!(crs_from_wkt(wintri).is_ok() && crs_from_wkt(&natearth).is_ok());
+        let unusable = [
+            wintri.replace(r#""standard_parallel_1",40"#, r#""standard_parallel_1",1e400"#),
+            wintri.replace(r#""central_meridian",-60"#, r#""central_meridian",1e400"#),
+            natearth.replace(r#""central_meridian",-60"#, r#""central_meridian",-1e400"#),
+            r#"PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]],ID["EPSG",6326]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["unknown",METHOD["Winkel Tripel"],PARAMETER["Longitude of natural origin",-60,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Latitude of 1st standard parallel",1e400,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["False easting",100,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",-200,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#.to_string(),
+        ];
+        for wkt in unusable {
+            let e = crs_from_wkt(&wkt).unwrap_err();
+            assert!(e.contains("isn't a finite number"), "{e}: {wkt}");
+        }
     }
 
     #[test]
