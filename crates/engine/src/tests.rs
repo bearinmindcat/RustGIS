@@ -14474,6 +14474,7 @@ fn shapefile_by_its_shp_address() {
         parts.iter().map(|(e, b)| (format!("/PI/TERESINA/HIDROGRAFIA/PI_2211001_RIOS.{e}?token=1"), b.clone())).collect();
     // The same without its .prj and .cpg, and one without its .dbf.
     files.extend(parts.iter().filter(|(e, _)| !matches!(*e, "prj" | "cpg")).map(|(e, b)| (format!("/plain/rios.{e}"), b.clone())));
+    files.extend(parts.iter().filter(|(e, _)| !matches!(*e, "prj" | "cpg")).map(|(e, b)| (format!("/keyed/rios.{e}?token=zz"), b.clone())));
     files.extend(parts.iter().filter(|(e, _)| *e != "dbf").map(|(e, b)| (format!("/nodbf/rios.{e}"), b.clone())));
     files.extend(parts.iter().filter(|(e, _)| *e != "shx").map(|(e, b)| (format!("/noshx/rios.{e}"), b.clone())));
     // One whose signature doesn't cover its .prj, and one whose address answers with its parts zipped.
@@ -14518,6 +14519,7 @@ fn shapefile_by_its_shp_address() {
     assert_eq!(r["features"], 1, "{r}");
     let said = &s.notices.last().unwrap().text;
     assert!(said.contains("no .prj, .cpg found or readable beside it (2 of 3") && said.contains("longitude/latitude"), "{said}");
+    assert!(said.contains("/plain/rios.shp: rios.shp: no .prj") && !said.contains("omitted]"), "{said}");
     // Their 404s are expected: noted once for the server, not recorded as failed requests.
     let records = s.diagnostics.records();
     let failed = |r: &&rustgis_data::diagnostics::Record| {
@@ -14529,6 +14531,10 @@ fn shapefile_by_its_shp_address() {
     s.run("layer.addUrl", &json!({"url": format!("{base}/plain/rios.shp"), "name": "Com crs", "crs": "EPSG:31983"})).unwrap();
     let said = &s.notices.last().unwrap().text;
     assert!(said.contains("no .prj, .cpg found or readable beside it") && !said.contains("longitude/latitude"), "{said}");
+    // A secret query taken out of the address in the notice is said; no query, no marker.
+    s.run("layer.addUrl", &json!({"url": format!("{base}/keyed/rios.shp?token=zz"), "name": "Keyed", "crs": "EPSG:31983"})).unwrap();
+    let said = &s.notices.last().unwrap().text;
+    assert!(said.contains("/keyed/rios.shp[query omitted]: rios.shp: no .prj") && !said.contains("zz"), "{said}");
     // A long name keeps its extension (and is still a .shp's zip).
     let long = crate::cmd::layer::url_file_name(&format!("https://x.org/{}.shp", "a".repeat(200)), b"PK\x03\x04").unwrap();
     assert!(long.ends_with(".zip") && long.chars().count() <= 120, "{long}");
@@ -35471,6 +35477,12 @@ fn a_cog_windows_read_is_apart_from_adding_it() {
     assert!(s.download_landed(id, b"{}".to_vec()));
     let e = s.run("layer.addDownload", &json!({"id": id, "url": url, "window": {"bbox": [1, 2, 3, 4]}})).unwrap_err();
     assert!(e.contains("\"window\" is for") && !e.contains("hidden-1330"), "{e}");
+    assert!(e.contains("scene.tif[query omitted]: \"window\" is for"), "{e}");
+    let id = s.download_started();
+    assert!(s.download_landed(id, b"{}".to_vec()));
+    let plain = url.split('?').next().unwrap_or(&url).to_string();
+    let e = s.run("layer.addDownload", &json!({"id": id, "url": plain, "window": {"bbox": [1, 2, 3, 4]}})).unwrap_err();
+    assert!(e.contains("scene.tif: \"window\" is for") && !e.contains("omitted]"), "no query went, none said: {e}");
     // A project opened while it was read: it isn't kept to be added.
     let read = read_cog_window(&window_asked(&s, &p).unwrap()).unwrap();
     let id = s.download_started();
@@ -40920,5 +40932,136 @@ fn a_clipped_colour_raster_stays_8_bit() {
             }
         }
     }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read
+/// (#1385): `source.syncState` says when it has edits the file lacks, when the file changed
+/// since, and neither once an edit is undone. The record is saved with the project.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_layer_read_from_a_file_says_whether_it_and_the_file_are_in_step() {
+    let dir = std::env::temp_dir().join(format!("rustgis-engine-sync-state-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = world();
+    for file in ["towns.shp", "towns.geojson"] {
+        let path = dir.join(file);
+        s.run("share.exportLayer", &json!({"layer": "Cities", "path": path})).unwrap();
+        let id = s.run("layer.addData", &json!({"path": path, "name": file})).unwrap()["layer"].as_u64().unwrap();
+        let state = |s: &mut Session| s.run("source.syncState", &json!({"layer": id})).unwrap();
+        assert_eq!(state(&mut s)["state"], "inSync", "{file}");
+        s.run("edit.setValue", &json!({"layer": id, "row": 0, "field": "name", "value": "Renamed"})).unwrap();
+        assert_eq!(state(&mut s)["state"], "edited", "{file}");
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert_eq!(state(&mut s)["state"], "inSync", "{file}");
+        assert!(s.map().layer(id as u32).unwrap().synced.is_some());
+    }
+    // Saved and opened again, both still know their files as read.
+    let project = dir.join("towns.rgis");
+    s.run("project.saveAs", &json!({"path": project.display().to_string()})).unwrap();
+    let mut t = Session::new(Project::default());
+    t.run("project.open", &json!({"path": project.display().to_string()})).unwrap();
+    for layer in ["towns.shp", "towns.geojson"] {
+        assert_eq!(t.run("source.syncState", &json!({"layer": layer})).unwrap()["state"], "inSync", "{layer}");
+    }
+    // The desktop app hashes the file on a thread of its own; the command takes that check.
+    {
+        use crate::cmd::reads::{read_ahead, read_land};
+        let here = t.run("source.syncState", &json!({"layer": "towns.shp"})).unwrap();
+        let ahead = read_ahead(&mut t, "source.syncState", &json!({"layer": "towns.shp"})).unwrap();
+        assert!(ahead.reads());
+        let read = ahead.run(&rustgis_analysis::control::Control::stoppable()).unwrap();
+        assert_eq!(read_land(&mut t, read).unwrap(), here);
+        assert!(t.read_ahead.is_none(), "the check was taken");
+        // The layer edited while it was checked: said, not checked again here.
+        let read = read_ahead(&mut t, "source.syncState", &json!({"layer": "towns.shp"}))
+            .unwrap()
+            .run(&rustgis_analysis::control::Control::stoppable())
+            .unwrap();
+        t.run("edit.setValue", &json!({"layer": "towns.shp", "row": 0, "field": "name", "value": "Renamed"})).unwrap();
+        let e = read_land(&mut t, read).unwrap_err();
+        assert!(e.contains("changed while it was checked"), "{e}");
+        t.run("edit.undo", &Value::Null).unwrap();
+        // Cancelled as it starts, the hashing looks and stops.
+        let control = rustgis_analysis::control::Control::cancelled_once_started();
+        let e = read_ahead(&mut t, "source.syncState", &json!({"layer": "towns.shp"})).unwrap().run(&control).err().unwrap();
+        assert!(e.to_lowercase().contains("cancel") && control.looked() > 0, "{e}");
+    }
+    // The same bytes written again is no change; other bytes are, named by file.
+    let dbf = dir.join("towns.dbf");
+    let bytes = std::fs::read(&dbf).unwrap();
+    std::fs::write(&dbf, &bytes).unwrap();
+    assert_eq!(s.run("source.syncState", &json!({"layer": "towns.shp"})).unwrap()["state"], "inSync");
+    let mut other = bytes.clone();
+    *other.last_mut().unwrap() ^= 1;
+    std::fs::write(&dbf, other).unwrap();
+    let state = s.run("source.syncState", &json!({"layer": "towns.shp"})).unwrap();
+    assert_eq!((state["state"].as_str(), state["changed"].clone()), (Some("sourceChanged"), json!(["towns.dbf"])));
+    s.run("edit.setValue", &json!({"layer": "towns.shp", "row": 0, "field": "name", "value": "Renamed"})).unwrap();
+    assert_eq!(s.run("source.syncState", &json!({"layer": "towns.shp"})).unwrap()["state"], "both");
+    // Read ahead (the desktop app's Add Data), in a coordinate system given: the record comes
+    // with the read.
+    {
+        use crate::cmd::reads::{read_ahead, read_land};
+        let p = json!({"path": dir.join("towns.shp"), "crs": "EPSG:4326", "name": "ahead"});
+        let ahead = read_ahead(&mut s, "layer.addData", &p).unwrap();
+        assert!(ahead.reads());
+        let read = ahead.run(&rustgis_analysis::control::Control::stoppable()).unwrap();
+        read_land(&mut s, read).unwrap();
+        assert!(s.map().layer_by_name("ahead").unwrap().synced.is_some());
+        assert_eq!(s.run("source.syncState", &json!({"layer": "ahead"})).unwrap()["state"], "inSync");
+    }
+    // A copy (pasted, or an offline area's part of the rows) isn't the layer read from the file:
+    // it has no record.
+    s.run("layer.copy", &json!({"layer": "towns.shp"})).unwrap();
+    s.run("layer.paste", &Value::Null).unwrap();
+    let pasted = s.map().layers.iter().filter(|l| l.dataset.source.as_deref().is_some_and(|p| p.ends_with("towns.shp"))).count();
+    assert!(pasted >= 2 && s.map().layers.iter().filter(|l| l.synced.is_some()).count() == 3, "only the layers read hold one");
+    s.run("offline.download", &json!({"name": "Here", "extent": [-180.0, -90.0, 180.0, 90.0]})).unwrap();
+    assert!(s.project.offline_areas[0].data.layers.iter().all(|l| l.synced.is_none()));
+    // A project from elsewhere names the path: a network share or a file no record is made for
+    // is refused without being opened.
+    let shares = [r"\\host\share\towns.shp", "//host/share/towns.shp", r"/\host\share\towns.shp", r"\/host/share/towns.shp"];
+    let more = [r"file:///\\host\share\towns.shp", r"\\?\UNC\host\share\towns.shp", "towns.json"];
+    for path in shares.into_iter().chain(more) {
+        let id = s.map().layer_by_name("towns.shp").unwrap().id;
+        s.map_mut().layer_mut(id).unwrap().dataset.source = Some(path.into());
+        let e = s.run("source.syncState", &json!({"layer": id})).unwrap_err();
+        assert!(e.contains("isn't a Shapefile or .geojson file on this computer"), "{path}: {e}");
+        // Nor read on a thread of its own: the desktop's check makes no read, and refuses as it lands.
+        let ahead = crate::cmd::reads::read_ahead(&mut s, "source.syncState", &json!({"layer": id})).unwrap();
+        assert!(!ahead.reads(), "{path}");
+        let read = ahead.run(&rustgis_analysis::control::Control::stoppable()).unwrap();
+        assert!(crate::cmd::reads::read_land(&mut s, read).is_err(), "{path}");
+    }
+    // Windows' long form of a path on a drive is a file on this computer: checked (and missing here).
+    let id = s.map().layer_by_name("towns.shp").unwrap().id;
+    // In the test's own folder on Windows (a file there by chance can't match); elsewhere it's
+    // just a name no file has.
+    #[cfg(windows)]
+    let long = format!(r"\\?\{}", dir.join("missing").join("towns.shp").display());
+    #[cfg(not(windows))]
+    let long = r"\\?\C:\missing\towns.shp".to_string();
+    s.map_mut().layer_mut(id).unwrap().dataset.source = Some(long);
+    let v = s.run("source.syncState", &json!({"layer": id})).unwrap();
+    assert!(v["changed"].as_array().unwrap().iter().any(|c| c.as_str().is_some_and(|c| c.ends_with("towns.shp"))), "{v}");
+    // A part that can't be read to record it (a folder where the .prj would be): the layer is
+    // added without a record, and says so; one read cleanly says nothing of it.
+    let said = |s: &Session, mark: u64| s.notices_since(mark).iter().filter(|n| n.text.contains("couldn't be read to record it")).count();
+    let odd = dir.join("odd");
+    std::fs::create_dir_all(odd.join("odd.prj")).unwrap();
+    for ext in ["shp", "shx", "dbf"] {
+        std::fs::copy(dir.join(format!("towns.{ext}")), odd.join(format!("odd.{ext}"))).unwrap();
+    }
+    let mark = s.notice_mark();
+    let id = s.run("layer.addData", &json!({"path": odd.join("odd.shp")})).unwrap()["layer"].as_u64().unwrap();
+    assert!(s.map().layer(id as u32).unwrap().synced.is_none());
+    assert_eq!(said(&s, mark), 1);
+    let mark = s.notice_mark();
+    s.run("layer.addData", &json!({"path": dir.join("towns.geojson"), "name": "clean"})).unwrap();
+    assert_eq!(said(&s, mark), 0);
+    // A layer that wasn't read from such a file has nothing to compare with.
+    assert!(s.run("source.syncState", &json!({"layer": "Cities"})).is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
