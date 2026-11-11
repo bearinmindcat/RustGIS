@@ -265,6 +265,7 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
 /// Keep a typed WKT's compatibility choice, or a shift it gives that isn't applied, with the decoded
 /// raster's other read notices, when the raster is in the typed system: a store that gives its own
 /// system, or a longitude/latitude grid, doesn't use it, so what it says isn't the raster's.
+#[cfg(not(target_arch = "wasm32"))]
 fn crs_lost(r: &mut raster::Raster, text: Option<&str>) {
     let used = text.filter(|t| Crs::parse(t).is_ok_and(|typed| typed == r.crs));
     crs_note(r, used);
