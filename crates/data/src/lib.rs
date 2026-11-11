@@ -543,21 +543,31 @@ pub fn web_mercator_moved_note(target: &str, layer: &str, moved: usize) -> Optio
 }
 
 /// The 85.05° notice for the layers `beyond` (each with its count of vertices moved, or `None`
-/// when only its extent tells), or `None` for none.
+/// when only its extent tells), or `None` for none. Layers counted and layers told by their
+/// extent are said in one notice, each in its own clause, so neither hides the other.
 fn web_mercator_said(beyond: &[(&str, Option<usize>)], target: &str) -> Option<String> {
-    let total: Option<usize> = beyond.iter().map(|(_, n)| *n).sum();
-    let names: Vec<&str> = beyond.iter().map(|(name, _)| *name).collect();
-    let said = match (names.as_slice(), total) {
-        ([], _) => return None,
-        (_, Some(1)) => format!("1 vertex of {} is beyond 85.05° north or south, and written at 85.05°", names.join(", ")),
-        ([one], Some(n)) => format!("{n} vertices of {one} are beyond 85.05° north or south, and written at 85.05°"),
-        (_, Some(n)) => format!("{n} vertices of {} are beyond 85.05° north or south, and written at 85.05°", layer_list(&names)),
-        ([one], None) => format!("the extent of {one} reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°"),
-        (_, None) => {
-            format!("the extents of {} reach beyond 85.05° north or south, and what lies beyond is written at 85.05°", layer_list(&names))
-        }
-    };
-    Some(format!("{target}: {said}, where Web Mercator ends"))
+    let counted: Vec<&str> = beyond.iter().filter(|(_, n)| n.is_some()).map(|(name, _)| *name).collect();
+    let total: usize = beyond.iter().filter_map(|(_, n)| *n).sum();
+    let extents: Vec<&str> = beyond.iter().filter(|(_, n)| n.is_none()).map(|(name, _)| *name).collect();
+    let mut said = Vec::new();
+    match (counted.as_slice(), total) {
+        ([], _) => {}
+        (_, 1) => said.push(format!("1 vertex of {} is beyond 85.05° north or south, and written at 85.05°", counted.join(", "))),
+        ([one], n) => said.push(format!("{n} vertices of {one} are beyond 85.05° north or south, and written at 85.05°")),
+        (_, n) => said.push(format!("{n} vertices of {} are beyond 85.05° north or south, and written at 85.05°", layer_list(&counted))),
+    }
+    match extents.as_slice() {
+        [] => {}
+        [one] => said.push(format!("the extent of {one} reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°")),
+        _ => said.push(format!(
+            "the extents of {} reach beyond 85.05° north or south, and what lies beyond is written at 85.05°",
+            layer_list(&extents)
+        )),
+    }
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!("{target}: {}, where Web Mercator ends", said.join("; ")))
 }
 
 /// Why exporting `ds` in `crs` would write other data than the layer's: a layer on another body

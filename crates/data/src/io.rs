@@ -3779,6 +3779,13 @@ mod tests {
             ]
         );
         assert!(crate::export_notes([(&window, Extent::new(-180.0, -80.0, 180.0, 84.0))], "tiles.gpkg", Crs::WebMercator).is_empty());
+        // A layer counted and a window told by its extent: one notice, saying both.
+        assert_eq!(
+            crate::export_notes([(&polar, ext(&polar)), (&window, Extent::new(-180.0, -90.0, 180.0, 84.0))], "map.gpkg", Crs::WebMercator),
+            [
+                "map.gpkg: 3 vertices of polar are beyond 85.05° north or south, and written at 85.05°; the extent of tiles reaches beyond 85.05° north or south, and what lies beyond is written at 85.05°, where Web Mercator ends"
+            ]
+        );
         // A layer without features that isn't a window (a raster layer's, or a streamed layer's
         // written a chunk at a time, whose export counts as it writes) has no extent tell.
         let empty = Dataset::new("empty", GeometryType::Point, vec![]);

@@ -645,9 +645,9 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
         }
     };
     // The features written give their own extent. A streamed layer written a chunk at a time has
-    // none at hand, and its whole source's extent tells instead (the vertices written at 85.05°
-    // in Web Mercator, the export counted). A raster layer's extent is its raster's, which the
-    // file doesn't hold.
+    // none at hand: its vertices beyond 85.05° in Web Mercator are counted as they're written
+    // (`e.beyond_web_mercator`), and its source's extent only serves the out-of-place check. A
+    // raster layer's extent is its raster's, which the file doesn't hold.
     let extent = if chunks.is_some() { l.extent() } else { ds.extent() };
     let mut notes = rustgis_data::export_notes([(ds, extent)], path, crs);
     notes.extend(moved);
