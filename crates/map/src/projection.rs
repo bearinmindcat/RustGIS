@@ -616,7 +616,7 @@ impl Projector {
                 .find_map(|t| t.strip_prefix("+R=")?.parse::<f64>().ok())
                 .filter(|r| r.is_finite() && *r > 0.0)
                 .unwrap_or(rustgis_geom::MERCATOR_R);
-            let engine = Engine::World(crate::world::World { kind, lon0, radius });
+            let engine = Engine::World(crate::world::World::new(kind, lon0, radius));
             return Ok(Projector { engine, to_meter: 1.0, domain, lon0, edge: std::sync::OnceLock::new() });
         }
         let native = proj4rs::Proj::from_proj_string(&def).map_err(|e| match e {

@@ -206,8 +206,9 @@ pub(crate) fn proj_key_refused(key: &str, val: &str) -> bool {
 
 impl Crs {
     /// A file's own coordinate system: checked (its PROJ definition must parse, or be a
-    /// projection RustGIS computes: a sinusoidal one, or an equidistant cylindrical one on an
-    /// ellipsoid) and added to the run's table, once per definition.
+    /// projection RustGIS computes: a sinusoidal one, an equidistant cylindrical one on an
+    /// ellipsoid, or Natural Earth, Winkel Tripel or Eckert IV) and added to the run's table, once
+    /// per definition.
     pub fn custom(def: CustomCrs) -> Result<Crs, String> {
         Crs::register(def, false)
     }
@@ -418,6 +419,9 @@ pub(crate) fn transformer_of(def: &str) -> Result<Transformer, String> {
     if let Some(eqc) = ellipsoidal_eqc(def) {
         return eqc;
     }
+    if let Some(world) = WorldProjection::from_proj4(def) {
+        return world.and_then(|w| Ok(Transformer { kind: Kind::World { world: Box::new(w), wgs84: Box::new(wgs84()?) } }));
+    }
     let native = proj4rs::Proj::from_proj_string(def).map_err(|e| e.to_string())?;
     let geographic = def.contains("+proj=longlat");
     Ok(Transformer { kind: Kind::Proj { native: Box::new(native), wgs84: Box::new(wgs84()?), geographic } })
@@ -576,6 +580,95 @@ impl EllipsoidalEqc {
     }
 }
 
+/// A world projection proj4rs lacks (Natural Earth, Winkel Tripel, Eckert IV), computed by
+/// `rustgis_geom::world` on a sphere of its datum's semi-major axis (or `+R`), as PROJ does for
+/// these spherical projections. Its datum (ellipsoid, shift to WGS 84, prime meridian) is kept for
+/// the datum transformation on longitude/latitude, as for [`EllipsoidalEqc`] (#1701).
+#[derive(Clone)]
+struct WorldProjection {
+    world: rustgis_geom::world::World,
+    /// Longitude/latitude on the projection's own datum and prime meridian.
+    geo: proj4rs::Proj,
+    /// Metres per unit of its coordinates.
+    to_meter: f64,
+}
+
+impl WorldProjection {
+    /// The projection a PROJ definition describes when it is `+proj=natearth`, `wintri` or
+    /// `eck4`: `None` for any other; an error for one it can't compute (axes other than east and
+    /// north, `+over`, a scale other than 1, a standard parallel that isn't a latitude short of a
+    /// pole). Winkel Tripel's parallel is `+lat_1`, else Winkel's own
+    /// ([`rustgis_geom::world::winkel_parallel`]), as the map draws it.
+    fn from_proj4(def: &str) -> Option<Result<WorldProjection, String>> {
+        use rustgis_geom::world::Kind as W;
+        let tokens: Vec<(&str, &str)> =
+            def.split_whitespace().map(|t| t.trim_start_matches('+')).map(|t| t.split_once('=').unwrap_or((t, ""))).collect();
+        let name = tokens.iter().find(|(k, _)| *k == "proj").map(|(_, v)| *v)?;
+        let kind = match name {
+            "natearth" => W::NaturalEarth,
+            "wintri" => W::WinkelTripel,
+            "eck4" => W::EckertIV,
+            _ => return None,
+        };
+        Some((|| {
+            if tokens.iter().any(|(k, v)| (*k == "k" || *k == "k_0") && v.parse::<f64>().ok() != Some(1.0)) {
+                return Err("a world projection with a scale other than 1 isn't supported".to_string());
+            }
+            let lat1 = match tokens.iter().find(|(k, _)| *k == "lat_1") {
+                Some((_, v)) => v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && v.abs() < 90.0)
+                    .ok_or_else(|| format!("+lat_1={v} isn't a latitude short of a pole"))?,
+                None => rustgis_geom::world::winkel_parallel(),
+            };
+            // proj4rs reads what every projection shares (centre, offsets, unit, axes, datum) from
+            // the same definition with a projection it has, the equidistant cylindrical, in place.
+            let stand_in: Vec<String> = def
+                .split_whitespace()
+                .filter(|t| !t.trim_start_matches('+').starts_with("lat_1="))
+                .map(|t| if t.trim_start_matches('+') == format!("proj={name}") { "+proj=eqc".to_string() } else { t.to_string() })
+                .collect();
+            let stand_in = stand_in.join(" ");
+            let native = proj4rs::Proj::from_proj_string(&stand_in).map_err(|e| e.to_string())?;
+            if !native.is_normalized_axis() || tokens.iter().any(|(k, _)| *k == "over") {
+                return Err("a world projection takes axes east and north only, with no +over".to_string());
+            }
+            let geo = eqc_geographic(&stand_in)?;
+            let (a, _) = geo.ellipse_parameters();
+            let to_meter = native.to_meter();
+            if !(a.is_finite() && a > 0.0 && to_meter.is_finite() && to_meter > 0.0) {
+                return Err("its earth or unit isn't usable".to_string());
+            }
+            let world = rustgis_geom::world::World {
+                kind,
+                lon0: native.longitude_of_origin().to_degrees(),
+                radius: a,
+                x0: native.false_easting(),
+                y0: native.false_northing(),
+                lat1,
+            };
+            Ok(WorldProjection { world, geo, to_meter })
+        })())
+    }
+
+    /// Its coordinates to longitude/latitude on its datum, then to WGS 84.
+    fn unproject(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let own = self.world.inverse(Coord::new(c.x * self.to_meter, c.y * self.to_meter))?;
+        let mut p = (own.x.to_radians(), own.y.to_radians(), 0.0);
+        proj4rs::transform::transform(&self.geo, wgs84, &mut p).ok()?;
+        Some(Coord::new(p.0.to_degrees(), p.1.to_degrees()))
+    }
+
+    /// WGS 84 longitude/latitude to its datum's, then to its coordinates.
+    fn project(&self, wgs84: &proj4rs::Proj, c: Coord) -> Option<Coord> {
+        let mut p = (c.x.to_radians(), c.y.to_radians(), 0.0);
+        proj4rs::transform::transform(wgs84, &self.geo, &mut p).ok()?;
+        let m = self.world.forward(Coord::new(p.0.to_degrees(), p.1.to_degrees()))?;
+        Some(Coord::new(m.x / self.to_meter, m.y / self.to_meter))
+    }
+}
+
 #[derive(Clone)]
 enum Kind {
     LonLat,
@@ -583,6 +676,7 @@ enum Kind {
     Proj { native: Box<proj4rs::Proj>, wgs84: Box<proj4rs::Proj>, geographic: bool },
     Sinusoidal(rustgis_geom::Sinusoidal),
     Eqc { eqc: Box<EllipsoidalEqc>, wgs84: Box<proj4rs::Proj> },
+    World { world: Box<WorldProjection>, wgs84: Box<proj4rs::Proj> },
 }
 
 /// Converts between a raster's coordinates and WGS 84 longitude/latitude.
@@ -599,6 +693,7 @@ impl std::fmt::Debug for Transformer {
             Kind::Proj { .. } => "proj",
             Kind::Sinusoidal(_) => "sinusoidal",
             Kind::Eqc { .. } => "eqc",
+            Kind::World { .. } => "world",
         };
         write!(f, "Transformer({k})")
     }
@@ -617,6 +712,7 @@ impl Transformer {
             }
             Kind::Sinusoidal(s) => s.inverse(c)?,
             Kind::Eqc { eqc, wgs84 } => eqc.unproject(wgs84, c)?,
+            Kind::World { world, wgs84 } => world.unproject(wgs84, c)?,
         };
         out.is_finite().then_some(out)
     }
@@ -644,6 +740,7 @@ impl Transformer {
             }
             Kind::Sinusoidal(s) => s.forward(c)?,
             Kind::Eqc { eqc, wgs84 } => eqc.project(wgs84, c)?,
+            Kind::World { world, wgs84 } => world.project(wgs84, c)?,
         };
         out.is_finite().then_some(out)
     }

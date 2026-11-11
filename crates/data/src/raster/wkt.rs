@@ -1351,6 +1351,12 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         // from Robinson's table, on a sphere of the semi-major axis as in PROJ.
         "SINUSOIDAL" => format!("+proj=sinu {at}"),
         "ROBINSON" => format!("+proj=robin {at}"),
+        // Computed by RustGIS too (`rustgis_geom::world`), on a sphere of the semi-major axis as in
+        // PROJ (#1701). Winkel Tripel's standard parallel is the file's (GDAL and PROJ always
+        // write one), else Winkel's own, as RustGIS draws and writes it.
+        "NATURAL_EARTH" => format!("+proj=natearth {at}"),
+        "ECKERT_IV" => format!("+proj=eck4 {at}"),
+        "WINKEL_TRIPEL" => format!("+proj=wintri +lat_1={} {at}", lat1.unwrap_or_else(rustgis_geom::world::winkel_parallel)),
         // EPSG's method 9840, on the ellipsoid (proj4rs follows the EPSG Guidance Note 7-2). Esri's
         // Orthographic is a spherical one: on a sphere they agree, on an ellipsoid they don't, and
         // which one an Esri file means can't be told, so that is refused rather than guessed.
@@ -1375,9 +1381,15 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         flip = Some("wsu");
     }
     let axis = match flip {
-        // The projections RustGIS computes itself (sinusoidal, and equidistant cylindrical on an
-        // ellipsoid) don't take `+axis`, and `Crs::custom` would refuse their definition.
-        Some(_) if proj.starts_with("+proj=sinu") || (proj.starts_with("+proj=eqc") && !sphere) => return Err(REVERSED_AXES.into()),
+        // The projections RustGIS computes itself (sinusoidal, the world projections proj4rs lacks,
+        // and equidistant cylindrical on an ellipsoid) don't take `+axis`, and `Crs::custom` would
+        // refuse their definition.
+        Some(_)
+            if ["+proj=sinu", "+proj=natearth", "+proj=wintri", "+proj=eck4"].iter().any(|p| proj.starts_with(p))
+                || (proj.starts_with("+proj=eqc") && !sphere) =>
+        {
+            return Err(REVERSED_AXES.into());
+        }
         flip => flip.map(|a| format!(" +axis={a}")).unwrap_or_default(),
     };
     let label = match p.title().trim() {
@@ -1666,9 +1678,9 @@ pub fn proj4_to_wkt(def: &str, name: &str) -> Option<String> {
 
 /// A PROJ definition as WKT1, with `code` as its EPSG authority.
 fn def_wkt(def: &str, name: &str, code: Option<u16>) -> Option<String> {
-    // proj4rs doesn't project the world projections RustGIS computes itself (rustgis-map's
-    // `world`): their ellipsoid, prime meridian and unit are read from the definition as a
-    // geographic one.
+    // proj4rs doesn't project the world projections RustGIS computes itself
+    // (`rustgis_geom::world`): their ellipsoid, prime meridian and unit are read from the
+    // definition as a geographic one.
     let proj = proj4rs::Proj::from_proj_string(def).ok().or_else(|| {
         let kind = def.split_whitespace().find_map(|t| t.strip_prefix("+proj="))?;
         if !matches!(kind, "natearth" | "wintri" | "eck4") {
@@ -1925,10 +1937,11 @@ fn def_wkt(def: &str, name: &str, code: Option<u16>) -> Option<String> {
             ps = vec![("central_meridian", lon0)];
             "Eckert_IV"
         }
-        // Its standard parallel is PROJ's default, Aitoff's and Hammer's parallel of acos(2/π)
-        // (about 50.46°), unless the definition gives one.
+        // Its standard parallel is the definition's, else Winkel's own of acos(2/π) (about
+        // 50.46°), the one the map draws a definition without one in. PROJ 9.8.1 takes 0 there,
+        // so it is always written.
         "wintri" => {
-            let lat1 = get("lat_1").unwrap_or_else(|| std::f64::consts::FRAC_2_PI.acos().to_degrees());
+            let lat1 = get("lat_1").unwrap_or_else(rustgis_geom::world::winkel_parallel);
             ps = vec![("standard_parallel_1", lat1), ("central_meridian", lon0)];
             "Winkel_Tripel"
         }
@@ -2122,6 +2135,86 @@ pub(crate) mod tests {
         assert!(wkt.contains("PARAMETER[\"standard_parallel_1\",50.4597"), "{wkt}");
         // Another projection proj4rs can't read still has none.
         assert_eq!(proj4_to_wkt("+proj=nosuch +datum=WGS84 +units=m +no_defs", "X"), None);
+    }
+
+    /// The world projections RustGIS computes itself are read from WKT as GDAL (WKT1), Esri and
+    /// PROJ (WKT2) write them, and from their ESRI codes (a FileGDB feature class's), not as
+    /// longitude/latitude: each places a point where PROJ 9.8.1 does, within a millimetre, and
+    /// back, with Winkel Tripel's standard parallel the file's. RustGIS's own WKT for its presets
+    /// reads back to the system it was written from (#1701).
+    #[test]
+    fn world_projections_are_read() {
+        let places = |crs: Crs, what: &str, points: &[((f64, f64), (f64, f64))]| {
+            let t = crs.transformer().unwrap_or_else(|e| panic!("{what}: {e}"));
+            for &((lon, lat), (x, y)) in points {
+                let m = t.from_lonlat(Coord::new(lon, lat)).unwrap();
+                assert!((m.x - x).abs() < 1e-3 && (m.y - y).abs() < 1e-3, "{what} {lon},{lat}: {m:?}");
+                let back = t.to_lonlat(Coord::new(x, y)).unwrap();
+                assert!((back.x - lon).abs() < 1e-8 && (back.y - lat).abs() < 1e-8, "{what} {x},{y}: {back:?}");
+            }
+        };
+        // Centred on 60°W, offset by 100 m and -200 m; Winkel Tripel's parallel at 40°N.
+        for (wkt1, esri, wkt2, points) in [
+            (
+                r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Natural_Earth"],PARAMETER["central_meridian",-60],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#,
+                r#"PROJCS["unknown",GEOGCS["GCS_unknown",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Natural_Earth"],PARAMETER["False_Easting",100.0],PARAMETER["False_Northing",-200.0],PARAMETER["Central_Meridian",-60.0],UNIT["Meter",1.0]]"#,
+                r#"PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]],ID["EPSG",6326]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["unknown",METHOD["Natural Earth"],PARAMETER["Longitude of natural origin",-60,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["False easting",100,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",-200,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#,
+                [((10.0, 50.0), (5944996.452900967, 5606224.7555508325)), ((-120.0, -35.0), (-5473849.827720951, -3939478.50735193))],
+            ),
+            (
+                r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Eckert_IV"],PARAMETER["central_meridian",-60],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#,
+                r#"PROJCS["unknown",GEOGCS["GCS_unknown",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Eckert_IV"],PARAMETER["False_Easting",100.0],PARAMETER["False_Northing",-200.0],PARAMETER["Central_Meridian",-60.0],UNIT["Meter",1.0]]"#,
+                r#"PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]],ID["EPSG",6326]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["unknown",METHOD["Eckert IV"],PARAMETER["Longitude of natural origin",-60,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["False easting",100,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",-200,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#,
+                [((10.0, 50.0), (5581773.315127191, 6071282.405990218)), ((-120.0, -35.0), (-5221045.868366751, -4438772.808673019))],
+            ),
+            (
+                r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["standard_parallel_1",40],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#,
+                r#"PROJCS["unknown",GEOGCS["GCS_unknown",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]],PROJECTION["Winkel_Tripel"],PARAMETER["False_Easting",100.0],PARAMETER["False_Northing",-200.0],PARAMETER["Central_Meridian",-60.0],PARAMETER["Standard_Parallel_1",40.0],UNIT["Meter",1.0]]"#,
+                r#"PROJCRS["unknown",BASEGEOGCRS["unknown",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]],ID["EPSG",6326]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]],CONVERSION["unknown",METHOD["Winkel Tripel"],PARAMETER["Longitude of natural origin",-60,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Latitude of 1st standard parallel",40,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8823]],PARAMETER["False easting",100,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",-200,LENGTHUNIT["metre",1],ID["EPSG",8807]]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#,
+                [((10.0, 50.0), (5795783.3284553625, 5703113.4871610105)), ((-120.0, -35.0), (-5457165.906327649, -3978189.6516721374))],
+            ),
+        ] {
+            for wkt in [wkt1, esri, wkt2] {
+                let crs = crs_from_wkt(wkt).unwrap_or_else(|e| panic!("{e}: {wkt}"));
+                assert!(matches!(crs, Crs::Custom(_)), "{wkt}");
+                places(crs, wkt, &points);
+            }
+        }
+        // World Natural Earth and Eckert IV on WGS 84, and on the spheres ESRI gives them.
+        for (code, points) in [
+            (54077, [((10.0, 50.0), (849270.9218429951, 5606424.7555508325)), ((-120.0, -35.0), (-10947899.655441903, -3939278.50735193))]),
+            (54012, [((10.0, 50.0), (797381.9021610274, 6071482.405990218)), ((-120.0, -35.0), (-10442291.736733502, -4438572.808673019))]),
+            (
+                53077,
+                [((10.0, 50.0), (848321.7736396515, 5600158.995300423)), ((-120.0, -35.0), (-10935664.243842268, -3934875.9556790087))],
+            ),
+            (
+                53012,
+                [((10.0, 50.0), (796489.6487278191, 6064688.5459756795)), ((-120.0, -35.0), (-10430607.033798292, -4433606.139858049))],
+            ),
+        ] {
+            let crs = crate::filegdb::crs_of_code(code).unwrap_or_else(|| panic!("ESRI:{code}"));
+            places(crs, &format!("ESRI:{code}"), &points);
+        }
+        // The presets' WKT reads back to the presets: Winkel Tripel at Winkel's own parallel.
+        for def in [
+            "+proj=natearth +lon_0=0 +datum=WGS84 +units=m +no_defs",
+            "+proj=wintri +lon_0=0 +datum=WGS84 +units=m +no_defs",
+            "+proj=eck4 +lon_0=0 +datum=WGS84 +units=m +no_defs",
+        ] {
+            let back = crs_from_wkt(&proj4_to_wkt(def, "World").unwrap()).unwrap().transformer().unwrap();
+            let direct = crate::raster::crs::transformer_of(def).unwrap();
+            for (lon, lat) in [(10.0, 50.0), (-120.0, -35.0), (179.0, 80.0)] {
+                let (a, b) = (back.from_lonlat(Coord::new(lon, lat)).unwrap(), direct.from_lonlat(Coord::new(lon, lat)).unwrap());
+                assert!((a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6, "{def} {lon},{lat}: {a:?} {b:?}");
+            }
+        }
+        // Axes pointing west aren't read, as for the other projections RustGIS computes; a
+        // standard parallel at a pole isn't a Winkel Tripel.
+        let wkt1 = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Natural_Earth"],PARAMETER["central_meridian",-60],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
+        assert_eq!(crs_from_wkt(&wkt1.replace(r#"AXIS["Easting",EAST]"#, r#"AXIS["Easting",WEST]"#)), Err(REVERSED_AXES.into()));
+        let wintri = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["standard_parallel_1",40],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
+        assert!(crs_from_wkt(&wintri.replace(r#""standard_parallel_1",40"#, r#""standard_parallel_1",90"#)).is_err());
     }
 
     #[test]
