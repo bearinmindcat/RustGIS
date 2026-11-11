@@ -66,7 +66,7 @@ pub fn commands() -> Vec<C> {
             r#"{"layer": raster, "index": "ndvi"|"ndwi"|"savi"|"nbr"|"ndbi"|"evi", "red"?, "green"?, "blue"?, "nir"?, "swir"?: band numbers, "name"?: output, "ran"?: (internal: a raster the app has worked out)}"#,
         ),
         C::new("raster.process", "Process", "Analyze › Imagery Tools", process).inputs(process_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
-            .params(r#"{"layer": raster, "operation": "clip"|"resample", "extent"?: [minLon, minLat, maxLon, maxLat] (clip; the view when omitted), "polygon"?: polygon layer (clip to its selected or all polygons; cells outside become no-data, or see-through in a raster with alpha or a colour one without no-data), "selectedOnly"?: bool (clip to selected polygons when true, all when false), "factor"?: n (resample: n×n pixels become one), "name"?: output, "ran"?: (internal: a raster the app has worked out)}"#),
+            .params(r#"{"layer": raster, "operation": "clip"|"resample", "extent"?: [minLon, minLat, maxLon, maxLat] (clip; the view when omitted), "polygon"?: polygon layer (clip to its selected or all polygons; cells outside become no-data, or see-through in a raster with alpha or a three-band colour one without no-data), "selectedOnly"?: bool (clip to selected polygons when true, all when false), "factor"?: n (resample: n×n pixels become one), "name"?: output, "ran"?: (internal: a raster the app has worked out)}"#),
         C::new("raster.mosaic", "Mosaic Rasters", "Analyze › Imagery Tools", raster_mosaic).inputs(mosaic_inputs).roles(&[]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Files)).params(
             r#"{"inputs": [raster layer or file path, …] (two or more, in one coordinate system and cell size; where they overlap the first wins), "name"?: output, "path"?: GeoTIFF to write the mosaic to}"#,
         ),
@@ -1129,8 +1129,8 @@ pub(crate) fn index_work(s: &Session, p: &Value) -> Result<super::workflows::Wor
 ///     even-odd rule within each polygon. Where multiple polygons overlap, their coverage is combined
 ///     (union: any cell falling inside at least one polygon is retained).
 ///   - The raster is cropped to the tight bounding box of valid selected polygons, and cells outside the
-///     polygons receive NoData; in a raster with alpha, or a colour one without NoData (which gains an
-///     alpha band), they are see-through, 0 in every band, so its pixel type is kept.
+///     polygons receive NoData; in a raster with alpha, or a three-band colour one without NoData (which
+///     gains an alpha band), they are see-through, 0 in every band, so its pixel type is kept.
 /// - **Partial Failure Reporting**:
 ///   - Features with invalid geometry are skipped and reported in the result messages.
 ///   - Polygon parts that cannot be projected onto the raster grid are reported separately.
