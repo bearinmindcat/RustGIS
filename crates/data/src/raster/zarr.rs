@@ -1440,6 +1440,18 @@ pub fn grid_crs(store: &Store, variable: &str) -> Option<(Crs, Option<String>)> 
     store.array(variable).and_then(|a| crs_of(store, a))
 }
 
+/// What a coordinate system typed for a store says ([`super::wkt::typed_crs_note`]: a shift it
+/// gives that isn't applied, its projection method's formula), when `r`, read from `variable`, is
+/// in it. It is only the fallback: a store that gives its own system ([`grid_crs`]), or a
+/// longitude/latitude grid, doesn't use it, so what it says isn't the raster's (#1678).
+pub fn typed_crs_note(store: &Store, variable: &str, r: &Raster, typed: &str) -> Option<String> {
+    if grid_crs(store, variable).is_some() {
+        return None;
+    }
+    let crs = Crs::parse(typed).ok().filter(|c| *c == r.crs)?;
+    super::wkt::typed_crs_note(typed, crs)
+}
+
 /// The stored (row, column) of `variable`'s map cell holding the point (`x`, `y`), in the grid's
 /// own coordinates: degrees of any longitude convention (-180–180 or 0–360) for a
 /// longitude/latitude grid. `None` outside the grid. The coordinates must be evenly spaced, as
@@ -1874,7 +1886,12 @@ pub fn read_metadata(dir: &std::path::Path) -> Result<Store> {
 /// Reads a slice of a store in a folder (`selection` as [`Selection::label`] writes it).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Result<Raster> {
-    let store = read_metadata(dir)?;
+    read_dir_in(&read_metadata(dir)?, dir, selection, crs)
+}
+
+/// [`read_dir`] with the store's metadata already read ([`read_metadata`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_dir_in(store: &Store, dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Result<Raster> {
     let mut sel = Selection::parse(selection);
     if sel.variable.is_empty() {
         sel.variable = store
@@ -1884,7 +1901,7 @@ pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Re
             .map(|v| v.path.clone())
             .ok_or_else(|| bad("the store has no variable that can be read"))?;
     }
-    let p = plan(&store, &sel)?;
+    let p = plan(store, &sel)?;
     let mut chunks = HashMap::new();
     let mut total = 0u64;
     for k in &p.keys {
@@ -1898,7 +1915,7 @@ pub fn read_dir(dir: &std::path::Path, selection: &str, crs: Option<&str>) -> Re
     }
     let crs = crs.map(Crs::parse).transpose().map_err(DataError::Format)?;
     let stem = dir.file_stem().and_then(|s| s.to_str()).unwrap_or("zarr");
-    let mut r = assemble(&store, &p, &chunks, &format!("{stem} {}", sel.label()), crs)?;
+    let mut r = assemble(store, &p, &chunks, &format!("{stem} {}", sel.label()), crs)?;
     r.source = Some(dir.display().to_string());
     Ok(r)
 }

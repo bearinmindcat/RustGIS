@@ -21628,14 +21628,17 @@ fn a_zarr_series_says_a_grid_its_store_doesnt_apply() {
 
 /// A `crs` typed for a Zarr store (UTM zone 17N on NAD 27, bound to WGS 84 by `conus`) says its
 /// grid isn't applied only when the slice is in it: a store that gives no system of its own, as a
-/// slice or a layer following the time slider. A store that gives its own (WGS 84's UTM zone 17N)
-/// and a longitude/latitude grid don't use it, and say nothing of it (#1678).
+/// slice or a layer following the time slider. A store that gives its own (WGS 84's UTM zone 17N,
+/// or the typed system itself) and a longitude/latitude grid don't use it, and say nothing of it:
+/// the store that gives the typed system says its grid once, as its own (#1678).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
     let _cache = zarr_cache_lock();
     let (typed, _, _) = nad27_bound_by_conus();
-    for (attrs, projected, expected) in [(json!({}), true, 1), (json!({"epsg_code": 32617}), true, 0), (json!({}), false, 0)] {
+    for (attrs, projected, expected) in
+        [(json!({}), true, 1), (json!({"epsg_code": 32617}), true, 0), (json!({}), false, 0), (json!({"crs_wkt": typed}), true, 1)]
+    {
         let (dir, path) = zarr_store_with("typed-grid", &attrs, projected);
         for following in [false, true] {
             let mut s = Session::new(Project::default());
@@ -21651,6 +21654,10 @@ fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
             let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no conversion")).count();
             let said = notices.iter().filter(|n| n.text.contains("(conus) isn't applied")).count();
             assert_eq!((said, shifts), (expected, expected), "{attrs} following={following}: {notices:?}");
+            // The typed system's own notice only where it's used: a store that gives the same
+            // system says it as the file's.
+            let typed_said = notices.iter().filter(|n| n.text.contains("the definition's")).count();
+            assert_eq!(typed_said, usize::from(attrs == json!({}) && projected), "{attrs} following={following}: {notices:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
     }
