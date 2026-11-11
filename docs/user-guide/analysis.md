@@ -1486,7 +1486,9 @@ The Analyze tab's imagery groups open their tools in the Workflows pane:
 - **Change Detection** (difference, ratio, percent), **Indices** (NDVI, NDWI, SAVI, NBR, NDBI,
   EVI), **Process** (clip to the view, to a box, or to a polygon layer's selected or all polygons,
   with the cells outside them no-data; resample) and the **Pixel Editor** (set the pixels inside a
-  polygon).
+  polygon). As in Project Raster, the cells outside the polygons are see-through instead (0, with
+  alpha 0) in an image with an alpha band, and a colour image with neither alpha nor no-data gains
+  one for them, so an 8-bit image stays 8-bit when it is exported.
 - **Mosaic Rasters** (`raster.mosaic`) merges tiles of one grid, such as the 1 km tiles of a state
   elevation model, into one raster in their own coordinate system and cell size, optionally
   written to a GeoTIFF: `{"inputs": ["dgm_1.tif", "dgm_2.tif", …], "path": "dem.tif"}`. Inputs
