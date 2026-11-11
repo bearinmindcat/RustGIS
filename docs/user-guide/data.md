@@ -118,8 +118,10 @@ or other WKT:
   notice.
 - The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
   FileGDB's system, a LAS file or a Zarr store. WKT given as a command's `crs`, and a GeoPackage
-  system read by its EPSG code, say only the two above: a transformation that isn't applied, and a
-  `BOUNDCRS` without one. A database layer's `crs` is read only for a geometry with no SRID of its
+  system read by its EPSG code, say of these only the two above: a transformation that isn't
+  applied, and a `BOUNDCRS` without one (typed WKT also says its projection method's formula, as
+  below). A Zarr store's `crs` says them only when the slice uses it: a store that gives its own
+  system, or a longitude/latitude grid, doesn't. A database layer's `crs` is read only for a geometry with no SRID of its
   own, by its EPSG code, with the same two notices; a geometry that has an SRID ignores it, so
   nothing is said of it.
 - A UTM name (`WGS_1984_UTM_Zone_31N`) gives its EPSG code only when the parameters are that

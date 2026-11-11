@@ -21533,6 +21533,129 @@ fn a_zarr_series_at_a_point() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// UTM zone 17N on NAD 27 as PROJ 9.8.1 writes it in WKT2 without a code, bound to WGS 84 by the
+/// NTv2 grid `conus` (`+proj=utm +zone=17 +datum=NAD27 +nadgrids=conus +type=crs`), with the
+/// geographic system it's on bound the same way, and the notice a system read from a file gives
+/// for it.
+#[cfg(not(target_arch = "wasm32"))]
+fn nad27_bound_by_conus() -> (String, String, &'static str) {
+    let datum = r#"DATUM["North American Datum 1927",ELLIPSOID["Clarke 1866",6378206.4,294.978698213898,LENGTHUNIT["metre",1]],ID["EPSG",6267]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8901]]"#;
+    let geog = format!(
+        r#"GEOGCRS["unknown",{datum},CS[ellipsoidal,2],AXIS["longitude",east,ORDER[1],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]],AXIS["latitude",north,ORDER[2],ANGLEUNIT["degree",0.0174532925199433,ID["EPSG",9122]]]]"#
+    );
+    let utm = format!(
+        r#"PROJCRS["unknown",BASEGEOGCRS["unknown",{datum}],CONVERSION["UTM zone 17N",METHOD["Transverse Mercator",ID["EPSG",9807]],PARAMETER["Latitude of natural origin",0,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8801]],PARAMETER["Longitude of natural origin",-81,ANGLEUNIT["degree",0.0174532925199433],ID["EPSG",8802]],PARAMETER["Scale factor at natural origin",0.9996,SCALEUNIT["unity",1],ID["EPSG",8805]],PARAMETER["False easting",500000,LENGTHUNIT["metre",1],ID["EPSG",8806]],PARAMETER["False northing",0,LENGTHUNIT["metre",1],ID["EPSG",8807]],ID["EPSG",16017]],CS[Cartesian,2],AXIS["(E)",east,ORDER[1],LENGTHUNIT["metre",1,ID["EPSG",9001]]],AXIS["(N)",north,ORDER[2],LENGTHUNIT["metre",1,ID["EPSG",9001]]]]"#
+    );
+    let wgs84 = r#"GEOGCRS["WGS 84",DATUM["World Geodetic System 1984",ELLIPSOID["WGS 84",6378137,298.257223563,LENGTHUNIT["metre",1]]],PRIMEM["Greenwich",0,ANGLEUNIT["degree",0.0174532925199433]],CS[ellipsoidal,2],AXIS["latitude",north,ORDER[1],ANGLEUNIT["degree",0.0174532925199433]],AXIS["longitude",east,ORDER[2],ANGLEUNIT["degree",0.0174532925199433]],ID["EPSG",4326]]"#;
+    let bound = |source: &str| {
+        format!(
+            r#"BOUNDCRS[SOURCECRS[{source}],TARGETCRS[{wgs84}],ABRIDGEDTRANSFORMATION["unknown to WGS84",METHOD["NTv2",ID["EPSG",9615]],PARAMETERFILE["Latitude and longitude difference file","conus",ID["EPSG",8656]]]]"#
+        )
+    };
+    let said = "the file's NTv2 transformation to WGS 84 (conus) isn't applied, so positions may be off by as much as that shift";
+    (bound(&utm), bound(&geog), said)
+}
+
+/// [`zarr_store_at`]'s store over three months with `attrs` added to `t`'s, and, when `projected`,
+/// its map in UTM zone 17N's metres instead of degrees: 1 km apart, around 500 km E 4800 km N.
+#[cfg(not(target_arch = "wasm32"))]
+fn zarr_store_with(tag: &str, attrs: &Value, projected: bool) -> (std::path::PathBuf, String) {
+    let (dir, path) = zarr_store_at(tag, &[0, 31, 59]);
+    let store = std::path::Path::new(&path);
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(store.join(".zmetadata")).unwrap()).unwrap();
+    let m = meta["metadata"].as_object_mut().unwrap();
+    for (k, v) in attrs.as_object().unwrap() {
+        m["t/.zattrs"][k.as_str()] = v.clone();
+    }
+    if projected {
+        let f32s = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        m["t/.zattrs"]["_ARRAY_DIMENSIONS"] = json!(["time", "y", "x"]);
+        for (from, to) in [("lat", "y"), ("lon", "x")] {
+            let arr = m.remove(&format!("{from}/.zarray")).unwrap();
+            m.insert(format!("{to}/.zarray"), arr);
+            m.remove(&format!("{from}/.zattrs"));
+            m.insert(format!("{to}/.zattrs"), json!({"_ARRAY_DIMENSIONS": [to], "units": "m"}));
+            std::fs::create_dir_all(store.join(to)).unwrap();
+        }
+        std::fs::write(store.join("y/0"), f32s(&[4_799_000.0, 4_800_000.0, 4_801_000.0])).unwrap();
+        std::fs::write(store.join("x/0"), f32s(&[499_000.0, 500_000.0, 501_000.0, 502_000.0])).unwrap();
+    }
+    std::fs::write(store.join(".zmetadata"), meta.to_string()).unwrap();
+    (dir, path)
+}
+
+/// A store's own system bound to WGS 84 by a grid (NAD 27 by `conus`) isn't applied where a series
+/// places its point, which it says once, on a longitude/latitude grid or a projected one; WGS 84's
+/// systems say nothing (#1678).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_series_says_a_grid_its_store_doesnt_apply() {
+    let _cache = zarr_cache_lock();
+    let (utm, geog, said) = nad27_bound_by_conus();
+    let said = format!("crs: {said}");
+    let wgs84 = rustgis_data::raster::wkt::to_wkt(rustgis_data::raster::Crs::LonLat).unwrap();
+    // On UTM zone 17N's central meridian, in the middle cell.
+    let at = rustgis_data::raster::Crs::from_epsg(32617)
+        .unwrap()
+        .transformer()
+        .unwrap()
+        .to_lonlat(rustgis_data::Coord::new(500_000.0, 4_800_000.0))
+        .unwrap();
+    for (projected, attrs, expected) in [
+        (false, json!({"crs_wkt": geog}), 1),
+        (false, json!({"crs_wkt": wgs84}), 0),
+        (true, json!({"crs_wkt": utm}), 1),
+        (true, json!({"epsg_code": 32617}), 0),
+    ] {
+        let (dir, path) = zarr_store_with("series-grid", &attrs, projected);
+        let (lon, lat) = if projected { (at.x, at.y) } else { (1.0, 30.0) };
+        let mut s = Session::new(Project::default());
+        let mark = s.notice_mark();
+        let r = s.run("zarr.series", &json!({"path": path, "variable": "t", "lon": lon, "lat": lat})).unwrap();
+        assert_eq!(r["values"].as_array().map(Vec::len), Some(3), "{attrs}: {r}");
+        // The notice, and every notice of a transformation not applied or missing: only it, or none.
+        let notices = s.notices_since(mark);
+        let shifts = notices
+            .iter()
+            .filter(|n| {
+                n.text.contains("isn't applied") || n.text.contains("has no transformation") || n.text.contains("has no conversion")
+            })
+            .count();
+        assert_eq!((notices.iter().filter(|n| n.text == said).count(), shifts), (expected, expected), "{attrs}: {notices:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// A `crs` typed for a Zarr store (UTM zone 17N on NAD 27, bound to WGS 84 by `conus`) says its
+/// grid isn't applied only when the slice is in it: a store that gives no system of its own, as a
+/// slice or a layer following the time slider. A store that gives its own (WGS 84's UTM zone 17N)
+/// and a longitude/latitude grid don't use it, and say nothing of it (#1678).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
+    let _cache = zarr_cache_lock();
+    let (typed, _, _) = nad27_bound_by_conus();
+    for (attrs, projected, expected) in [(json!({}), true, 1), (json!({"epsg_code": 32617}), true, 0), (json!({}), false, 0)] {
+        let (dir, path) = zarr_store_with("typed-grid", &attrs, projected);
+        for following in [false, true] {
+            let mut s = Session::new(Project::default());
+            let mark = s.notice_mark();
+            let mut p = json!({"path": path, "variable": "t", "crs": typed});
+            if following {
+                p["time"] = json!(true);
+            } else {
+                p["index"] = json!({"time": 1});
+            }
+            s.run("layer.addZarr", &p).unwrap();
+            let notices = s.notices_since(mark);
+            let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no conversion")).count();
+            let said = notices.iter().filter(|n| n.text.contains("(conus) isn't applied")).count();
+            assert_eq!((said, shifts), (expected, expected), "{attrs} following={following}: {notices:?}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A Zarr variable summarised over time (#556): each statistic, a season, a period and a layer's
 /// period, into a raster layer kept in the project.
 #[cfg(not(target_arch = "wasm32"))]

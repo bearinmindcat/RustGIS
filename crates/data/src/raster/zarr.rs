@@ -2343,10 +2343,9 @@ mod tests {
             ("lat/c/0".to_string(), bytes(&[43.1, 43.0])),
             ("lon/c/0".to_string(), bytes(&[-79.1, -79.0])),
         ]);
-        for (attrs, lost) in [
-            (serde_json::json!({"crs_wkt": BOUND_BY_A_GRID}), vec![said]),
-            (serde_json::json!({"crs_wkt": "EPSG:4326"}), vec![]),
-        ] {
+        for (attrs, lost) in
+            [(serde_json::json!({"crs_wkt": BOUND_BY_A_GRID}), vec![said]), (serde_json::json!({"crs_wkt": "EPSG:4326"}), vec![])]
+        {
             let elev = serde_json::json!({
                 "zarr_format": 3, "node_type": "array", "shape": [2, 2], "data_type": "int16",
                 "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": [2, 2]}},

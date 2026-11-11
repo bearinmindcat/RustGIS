@@ -263,8 +263,18 @@ pub fn pick_variable(store: &zarr::Store, sel: &mut zarr::Selection) -> Result<(
 }
 
 /// Keep a typed WKT's compatibility choice, or a shift it gives that isn't applied, with the decoded
-/// raster's other read notices.
+/// raster's other read notices, when the raster is in the typed system: a store that gives its own
+/// system, or a longitude/latitude grid, doesn't use it, so what it says isn't the raster's.
 fn crs_lost(r: &mut raster::Raster, text: Option<&str>) {
+    let used = text.filter(|t| Crs::parse(t).is_ok_and(|typed| typed == r.crs));
+    crs_note(r, used);
+}
+
+/// [`crs_lost`] without its check, for a slice the app read itself and handed over as a GeoTIFF:
+/// the app used the typed system only for a store that doesn't give its own, which the GeoTIFF
+/// doesn't tell, and its system read back from the GeoTIFF needn't be the typed one's, so what the
+/// typed system says is kept rather than left unsaid.
+fn crs_note(r: &mut raster::Raster, text: Option<&str>) {
     if let Some(text) = text
         && let Some(note) = raster::wkt::typed_crs_note(text, r.crs)
         && !r.lost.contains(&note)
@@ -290,7 +300,7 @@ pub(crate) fn add(s: &mut Session, p: &Value) -> CmdResult {
         let i = s.downloaded.iter().position(|(d, _)| *d == id).ok_or("no such read (it was dropped when another project opened)")?;
         let (_, tif) = s.downloaded.remove(i);
         let mut r = raster::read_bytes("zarr.tif", &tif).map_err(|e| e.to_string())?;
-        crs_lost(&mut r, crs);
+        crs_note(&mut r, crs);
         r.source = Some(root.clone());
         let name = ps(p, "name").map(str::to_string).unwrap_or_else(|| layer_name(&root, &sel, &[]));
         let mut layer = RasterLayer::from_bytes(r, format!("{}.tif", store_name(&root)), tif);
@@ -1324,8 +1334,12 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         if count == 0 {
             return Err("no step to read".into());
         }
-        // The point in the grid's coordinates.
+        // The point in the grid's coordinates. A longitude/latitude grid's are read as such whatever
+        // its WKT says; a shift the WKT gives that isn't applied is still said, as its slices say it.
         let (x, y) = if zarr::is_lonlat_grid(&store, &var) {
+            if let Some((_, Some(note))) = zarr::grid_crs(&store, &var) {
+                s.warn(format!("crs: {note}"));
+            }
             (lon, lat)
         } else {
             let crs = match zarr::grid_crs(&store, &var) {
