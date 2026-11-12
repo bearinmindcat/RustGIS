@@ -3117,6 +3117,130 @@ fn custom_projections_switch_keep_scale_query_and_render() {
     }
 }
 
+/// Shaded Relief's cast shadows: set, kept when left out, clamped, a new one without; saved with
+/// the project only when there are some, and drawn in an export (waited for).
+#[test]
+fn shaded_relief_keeps_its_cast_shadows() {
+    let mut s = with_raster();
+    let shadow = |s: &Session| match s.map().layers.first().and_then(|l| l.raster.as_ref()).map(|r| &r.style.renderer) {
+        Some(rustgis_map::RasterRenderer::ShadedRelief { shadow, .. }) => *shadow,
+        other => panic!("{other:?}"),
+    };
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0);
+    let shadows_saved = |s: &mut Session| s.project.saved_text(None).unwrap().0.matches("\"shadow\"").count();
+    let before = shadows_saved(&mut s);
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 0.7})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 200})).unwrap();
+    assert_eq!(shadow(&s), 0.7, "left out, kept");
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 4})).unwrap();
+    assert_eq!(shadow(&s), 1.0);
+    assert_eq!(shadows_saved(&mut s), before + 1, "saved only when there are some");
+    assert!(crate::cmd::share::map_png(&mut s, Some(300.0), Some(200.0), None).unwrap().len() > 1000);
+    s.run("raster.symbology", &json!({"type": "stretch"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief"})).unwrap();
+    assert_eq!(shadow(&s), 0.0, "a new Shaded Relief casts none");
+}
+
+/// A map export that draws a layer without its cast shadows says so, as such (not as a tile layer
+/// that failed), in a PNG, a GeoTIFF and the app's map image alike; one with nothing missing says
+/// nothing.
+#[test]
+fn a_map_export_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-notice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let said =
+        |s: &Session| s.notices.iter().filter(|n| n.text.contains("cast shadows aren't drawn")).map(|n| n.text.clone()).collect::<Vec<_>>();
+    s.run("share.exportMap", &json!({"path": dir.join("clean.png").display().to_string(), "width": 200, "height": 150})).unwrap();
+    assert!(said(&s).is_empty(), "{:?}", said(&s));
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    for name in ["shadowless.png", "shadowless.tif"] {
+        let before = said(&s).len();
+        s.run("share.exportMap", &json!({"path": dir.join(name).display().to_string(), "width": 200, "height": 150})).unwrap();
+        let now = said(&s);
+        assert_eq!(now.len(), before + 1, "{name}: {now:?}");
+        let last = now.last().unwrap();
+        assert!(last.contains("scene: its cast shadows aren't drawn") && last.contains("read in place"), "{name}: {last}");
+        assert!(!last.contains("tile layer"), "{name}: {last}");
+    }
+    // The app's Capture To Clipboard and Export Map download (`map_png`) say it too.
+    let before = said(&s).len();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert_eq!(said(&s).len(), before + 1, "{:?}", said(&s));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Whatever draws the map for someone says a layer drawn without its cast shadows, named by the
+/// layer: the map's image, PDF and web map, and the exports of a layout, a presentation and a
+/// report showing it. Drawn on the interface's thread, which doesn't wait for them, shadows still
+/// being worked out are said too.
+#[test]
+fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "shadow": 1})).unwrap();
+    s.run("layout.new", &json!({"page": "a5", "template": "map"})).unwrap();
+    s.run("presentation.new", &json!({"name": "Relief"})).unwrap();
+    // First, as a PNG of the presentation is its first page.
+    s.run("presentation.mapPage", &json!({"title": "Relief", "at": 0})).unwrap();
+    assert_eq!(s.project.presentations[0].pages[0].kind.code(), "map");
+    s.run("report.new", &json!({"layer": "Countries", "name": "Relief", "fields": ["name"], "where": "name LIKE 'F%'"})).unwrap();
+    s.run("report.newTemplate", &json!({"report": "Relief"})).unwrap();
+    // Read in place with only its overview held: no whole grid to trace.
+    let rl = s.map_mut().layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+    rl.in_place = true;
+    let mut r = (**rl.data.as_ref().unwrap()).clone();
+    r.overview = Some((800, 600));
+    rl.data = Some(std::sync::Arc::new(r));
+    let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("scene: its cast shadows aren't drawn")).count();
+    let dir = std::env::temp_dir().join(format!("rustgis-cast-every-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = |name: &str| dir.join(name).display().to_string();
+    let draws: Vec<(&str, Box<dyn Fn(&mut Session)>)> = vec![
+        ("map image", Box::new(|s| drop(crate::cmd::share::map_png(s, Some(200.0), Some(150.0), None).unwrap()))),
+        ("map PDF", Box::new(|s| drop(crate::cmd::share::map_pdf(s, 72.0).unwrap()))),
+        (
+            "map export",
+            Box::new(|s| drop(s.run("share.exportMap", &json!({"path": path("map.png"), "width": 200, "height": 150})).unwrap())),
+        ),
+        ("web map", Box::new(|s| drop(crate::cmd::sharing::share_bytes(s, "webMap", &json!({})).unwrap()))),
+        ("layout PNG", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.png"), "dpi": 36})).unwrap()))),
+        ("layout PDF", Box::new(|s| drop(s.run("layout.export", &json!({"layout": 0, "path": path("page.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PDF", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.pdf"), "dpi": 36})).unwrap()))),
+        ("presentation PNG", Box::new(|s| drop(s.run("presentation.export", &json!({"path": path("deck.png"), "dpi": 36})).unwrap()))),
+        (
+            "report PDF",
+            Box::new(|s| drop(s.run("report.export", &json!({"report": "Relief", "path": path("report.pdf"), "dpi": 36})).unwrap())),
+        ),
+    ];
+    for (what, draw) in &draws {
+        // A notice repeating the last one is kept once (two presentation exports in a row).
+        s.notices.clear();
+        draw(&mut s);
+        assert!(said(&s) > 0, "{what}: {:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
+    }
+    std::fs::remove_dir_all(&dir).ok();
+    // On the interface's thread a new sun's shadows aren't waited for: the image says so.
+    let mut s = with_raster();
+    s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 123, "shadow": 1})).unwrap();
+    crate::render::on_the_interface_thread();
+    crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
+    assert!(
+        s.notices.iter().any(|n| n.text.contains("still being worked out")),
+        "{:?}",
+        s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn raster_layers_open_style_identify_and_round_trip() {
     let mut s = with_raster();
@@ -7847,14 +7971,15 @@ fn a_publication_legend_takes_the_columns_that_fit_the_free_rectangle() {
 fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
     let mut s = Session::new(Project::default());
-    // A classified raster (four values, each a class), over a polygon layer the legend lists.
+    // A raster on a ramp (a classified one has its classes in the legend instead, #1679), over a
+    // polygon layer the legend lists.
     let (w, h) = (20u32, 20u32);
     let z: Vec<f32> = (0..w * h).map(|i| (i % 4) as f32 + 1.0).collect();
     let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
     let r = Raster::new("classes", w, h, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Byte").unwrap();
     let bytes = geotiff::write(&r, 0).unwrap();
     crate::cmd::raster::add_raster(&mut s, "classes", rustgis_map::RasterLayer::from_bytes(r, "classes.tif".to_string(), bytes)).unwrap();
-    s.run("raster.symbology", &json!({"type": "unique"})).unwrap();
+    s.run("raster.symbology", &json!({"type": "stretch"})).unwrap();
     let path = std::env::temp_dir().join(format!("rustgis-1680-{}.geojson", std::process::id()));
     std::fs::write(
         &path,
@@ -7884,6 +8009,324 @@ fn a_publication_without_a_colorbar_sizes_the_legend_box_to_the_legend() {
     bad["colorbar"] = json!("hidden");
     assert!(s.run("layout.publication", &bad).unwrap_err().contains("colorbar is"));
     let _ = std::fs::remove_file(&path);
+}
+
+/// Adds a land cover raster over 0–10° east and north drawn by its colour table: `classes`'
+/// values, each a run of cells, named as the file names them (an empty name shows the value).
+fn add_land_cover(s: &mut Session, name: &str, classes: &[(u8, &str)]) {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    let (w, h) = (40usize, 40usize);
+    let z: Vec<f32> = (0..w * h).map(|i| f32::from(classes[i * classes.len() / (w * h)].0)).collect();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.25, pixel_height: -0.25 };
+    let mut palette = vec![[0, 0, 0, 0]; 256];
+    let mut names = vec![String::new(); 256];
+    for (v, n) in classes {
+        palette[usize::from(*v)] = [v.wrapping_mul(37), v.wrapping_mul(91), 255 - v, 255];
+        names[usize::from(*v)] = (*n).to_string();
+    }
+    let mut r = Raster::new(name, w as u32, h as u32, vec![z], gt, Crs::LonLat, None, ColorHint::Palette(palette), "Byte").unwrap();
+    r.bands[0].classes = names;
+    let bytes = geotiff::write(&r, 0).unwrap();
+    let mut rl = rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes);
+    rl.style.renderer = rustgis_map::raster::RasterRenderer::Colormap;
+    crate::cmd::raster::add_raster(s, name, rl).unwrap();
+}
+
+/// A publication of a land cover (MapBiomas clipped to a municipality: 11 classes in its colour
+/// table) lists its classes in the legend instead of a colorbar, and sizes the box to them (#1679).
+/// A raster on a ramp under it still gets the colorbar.
+#[test]
+fn a_publication_lists_a_land_covers_classes_instead_of_a_colorbar() {
+    let mapbiomas = [
+        (3, "Formação Florestal"),
+        (4, "Formação Savânica"),
+        (9, "Silvicultura"),
+        (12, "Formação Campestre"),
+        (15, "Pastagem"),
+        (21, "Mosaico de Usos"),
+        (24, "Área Urbanizada"),
+        (33, "Rio, Lago e Oceano"),
+        (39, "Soja"),
+        (41, "Outras Lavouras Temporárias"),
+        (46, "Café"),
+    ];
+    let mut s = Session::new(Project::default());
+    add_land_cover(&mut s, "Uso do solo", &mapbiomas);
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let r = s.run("layout.publication", &p).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let el = |name: &str| l.elements.iter().find(|e| e.name == name);
+    assert!(el("Colorbar").is_none(), "the classes are the key: {r}");
+    let (bx, legend) = (el("Legend Box").unwrap().h, el("Legend").unwrap().h);
+    assert!((bx - legend - 4.0).abs() < 1e-6, "{bx} {legend}: {r}");
+    // Its name and 11 classes, in the columns it took.
+    let row = 15.0 * 25.4 / 96.0;
+    let columns = r["legendColumns"].as_f64().unwrap_or(1.0);
+    assert!(legend >= (12.0 / columns).floor() * row - 1e-6, "{legend} mm in {columns}: {r}");
+    assert!(!r["warnings"].to_string().contains("more than fits"), "{r}");
+    let map = s.map_mut();
+    let sizes = crate::render::layout::legend_sizes_mm(map, 1e6, false, false, (&[], &Default::default())).unwrap();
+    assert!((sizes[0].1 - 12.0 * row).abs() < 1e-6, "{sizes:?}");
+    // A stretched raster under it: its colorbar stays, and the classes too.
+    {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let z: Vec<f32> = (0..400).map(|i| i as f32 * 1.5).collect();
+        let dem = Raster::new("dem", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = rustgis_data::raster::geotiff::write(&dem, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, "Altitude", rustgis_map::RasterLayer::from_bytes(dem, "dem.tif".to_string(), bytes))
+            .unwrap();
+    }
+    s.run("layer.move", &json!({"layer": "Altitude", "to": 99})).unwrap();
+    // A colorbar added with the DEM to show says nothing of a placeholder.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("empty placeholder")));
+    let r = s.run("layout.publication", &p).unwrap();
+    let l = s.project.layouts.last().unwrap();
+    let bar = l.elements.iter().find_map(|e| match &e.kind {
+        rustgis_map::layout::ElementKind::Colorbar { layer, .. } => Some(layer.clone()),
+        _ => None,
+    });
+    assert_eq!(bar, Some(Some("Altitude".to_string())), "{r}");
+    assert!(l.elements.iter().any(|e| e.name == "Legend"), "{r}");
+}
+
+/// The colorbar goes to the topmost visible raster with a colour scale: an RGB composite over a
+/// stretched DEM leaves it to the DEM. A colour table over more values than a legend lists gives
+/// neither classes nor a colorbar, and the publication says so; one with its classes known says
+/// nothing (#1679).
+#[test]
+fn a_publication_keys_the_raster_under_an_rgb_and_says_an_unlisted_colour_table() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster, geotiff};
+    use rustgis_map::layout::ElementKind;
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+    let add = |s: &mut Session, name: &str, r: Raster| {
+        let bytes = geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    };
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let bar_of = |s: &Session| {
+        s.project.layouts.last().unwrap().elements.iter().find_map(|e| match &e.kind {
+            ElementKind::Colorbar { layer, .. } => Some(layer.clone()),
+            _ => None,
+        })
+    };
+    // A stretched DEM under an RGB composite.
+    let mut s = Session::new(Project::default());
+    let z: Vec<f32> = (0..400).map(|i| i as f32 * 1.5).collect();
+    add(&mut s, "Altitude", Raster::new("dem", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap());
+    let band = |k: f32| (0..400).map(|i| (i as f32 * k) % 255.0).collect::<Vec<f32>>();
+    let rgb =
+        Raster::new("rgb", 20, 20, vec![band(1.0), band(2.0), band(3.0)], gt, Crs::LonLat, None, ColorHint::Rgb { alpha: false }, "Byte");
+    add(&mut s, "Imagem", rgb.unwrap());
+    assert!(s.map().layers[0].raster.as_ref().is_some_and(|r| matches!(r.style.renderer, rustgis_map::RasterRenderer::Rgb { .. })));
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar_of(&s), Some(Some("Altitude".to_string())), "{r}");
+    // A colour table over 300 values: no class to list, no colorbar, and a warning.
+    let mut s = Session::new(Project::default());
+    let mut palette = vec![[0, 0, 0, 0]; 256];
+    for (i, c) in palette.iter_mut().enumerate() {
+        *c = [i as u8, 100, 255 - i as u8, 255];
+    }
+    let z: Vec<f32> = (0..400).map(|i| (i % 300) as f32).collect();
+    let many = Raster::new("many", 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Palette(palette), "UInt16").unwrap();
+    assert!(many.bands[0].stats.categories.is_none());
+    for name in ["Classes", "Mais classes"] {
+        let mut rl = rustgis_map::RasterLayer::from_path(many.clone(), "many.tif");
+        rl.style.renderer = rustgis_map::RasterRenderer::Colormap;
+        crate::cmd::raster::add_raster(&mut s, name, rl).unwrap();
+    }
+    let said = "2 raster(s) drawn by a colour table over more values than a legend can list (over 256, or not whole numbers) have no key in the legend: Mais classes, Classes";
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar_of(&s), None, "{r}");
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    assert_eq!(
+        warnings.iter().filter(|w| w.contains("over more values than a legend")).collect::<Vec<_>>(),
+        [said],
+        "one, with the count: {r}"
+    );
+    // A colorbar with no layer has nothing to show either, and doesn't promise the legend.
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    let empty: Vec<String> =
+        s.notices_since(mark).iter().filter(|n| n.text.contains("empty placeholder")).map(|n| n.text.clone()).collect();
+    assert_eq!(
+        empty,
+        [
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Mais classes, Classes draws a colour table over more values than a legend or a colorbar can list (over 256, or not whole numbers), so nothing keys it"
+        ]
+    );
+    // A legend added says it too, once; told to leave one out, it names the other.
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    let notices = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("over more values than a legend")).map(|n| n.text.clone()).collect()
+    };
+    assert_eq!(notices(&s, mark), [said]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["classes"]})).unwrap();
+    assert_eq!(notices(&s, mark), [said.replace("2 raster(s)", "1 raster(s)").replace(": Mais classes, Classes", ": Mais classes")]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["Classes", "Mais classes"]})).unwrap();
+    assert!(notices(&s, mark).is_empty(), "both left out: nothing to say");
+    // Its classes known: nothing said.
+    let mut s = Session::new(Project::default());
+    add_land_cover(&mut s, "Uso do solo", &[(3, "Floresta"), (15, "Pastagem")]);
+    let r = s.run("layout.publication", &p).unwrap();
+    assert!(!r["warnings"].to_string().contains("more values than a legend"), "{r}");
+    assert!(!r["warnings"].to_string().contains("through an overview"), "{r}");
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "legend"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("more values than a legend") && !n.text.contains("through an overview")));
+    // A colorbar added by hand with no layer: none of the land cover's codes.
+    let r = s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    let colorbar = r["element"].as_u64().unwrap() as u32;
+    let l = s.project.layouts.last().unwrap();
+    let shown = |l: &rustgis_map::layout::Layout| match l.element(colorbar).map(|e| &e.kind) {
+        Some(ElementKind::Colorbar { frame, layer, .. }) => match l.element(*frame).map(|f| &f.kind) {
+            Some(ElementKind::MapFrame { map, .. }) => {
+                let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map)).unwrap();
+                rustgis_map::layout::colorbar_layer(m, layer.as_deref()).map(|l| l.name.clone())
+            }
+            _ => panic!("no frame"),
+        },
+        _ => panic!("no colorbar"),
+    };
+    assert_eq!(shown(l), None, "the land cover's classes are in the legend, not on a colorbar");
+    // It says so, once; one naming the land cover shows it, and says nothing.
+    let placeholder = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("empty placeholder")).map(|n| n.text.clone()).collect()
+    };
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "colorbar"})).unwrap();
+    assert_eq!(
+        placeholder(&s, mark),
+        [
+            "the colorbar has no raster with a colour scale to show, so it draws an empty placeholder: Uso do solo is drawn by classes, which a legend lists rather than a colorbar (give \"layer\" to show its colours on one anyway)"
+        ]
+    );
+    let mark = s.notice_mark();
+    let named = s.run("layout.addElement", &json!({"kind": "colorbar", "layer": "Uso do solo"})).unwrap()["element"].clone();
+    assert!(placeholder(&s, mark).is_empty());
+    // Set back to no layer, it says so again.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": named, "layer": ""})).unwrap();
+    assert_eq!(placeholder(&s, mark).len(), 1, "{:?}", s.notices_since(mark));
+    // Its classes read through an overview: said once, by the publication and the legend, unless the
+    // land cover is left out.
+    if let Some(r) = s.map_mut().layers[0].raster.as_mut().and_then(|r| r.data.as_mut()) {
+        std::sync::Arc::make_mut(r).overview = Some((10, 10));
+    }
+    let r = s.run("layout.publication", &p).unwrap();
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    let reduced = "1 raster(s) drawn by classes were read through an overview, so the legend lists the classes found there and may miss a rare one the map draws: Uso do solo";
+    assert_eq!(warnings.iter().filter(|w| w.contains("through an overview")).collect::<Vec<_>>(), [reduced], "{r}");
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    let said: Vec<String> =
+        s.notices_since(mark).iter().filter(|n| n.text.contains("through an overview")).map(|n| n.text.clone()).collect();
+    assert_eq!(said, [reduced]);
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "exclude": ["Uso do solo"]})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("through an overview")), "left out");
+}
+
+/// A stretched raster on top still reading keeps its place: the publication gives no colorbar and
+/// says why, rather than the scale of the stretched raster under it under its name; once read, it
+/// gets the colorbar (#1679).
+#[test]
+fn a_publication_gives_no_colorbar_for_a_raster_still_reading() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    let mut s = Session::new(Project::default());
+    for (name, k) in [("Profundidade", 2.0), ("Altitude", 1.5)] {
+        let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 0.5, pixel_height: -0.5 };
+        let z: Vec<f32> = (0..400).map(|i| i as f32 * k).collect();
+        let r = Raster::new(name, 20, 20, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
+        crate::cmd::raster::add_raster(&mut s, name, rustgis_map::RasterLayer::from_bytes(r, format!("{name}.tif"), bytes)).unwrap();
+    }
+    s.run("layer.move", &json!({"layer": "Altitude", "to": 99})).unwrap();
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let bar = |s: &Session| {
+        s.project.layouts.last().unwrap().elements.iter().find_map(|e| match &e.kind {
+            rustgis_map::layout::ElementKind::Colorbar { layer, .. } => Some(layer.clone()),
+            _ => None,
+        })
+    };
+    fn top(s: &mut Session) -> &mut rustgis_map::RasterLayer {
+        s.map_mut().layers.iter_mut().find(|l| l.name == "Profundidade").and_then(|l| l.raster.as_mut()).unwrap()
+    }
+    let read = top(&mut s).data.take();
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar(&s), None, "not the DEM's scale under its name: {r}");
+    let still = "Profundidade is still reading, so its colour scale isn't known and the layout has no colorbar for it; add one with layout.addElement once it has read";
+    assert!(r["warnings"].as_array().unwrap().iter().any(|w| w == still), "{r}");
+    // Read: its colorbar, and nothing said.
+    top(&mut s).data = read;
+    let r = s.run("layout.publication", &p).unwrap();
+    assert_eq!(bar(&s), Some(Some("Profundidade".to_string())), "{r}");
+    assert!(!r["warnings"].to_string().contains("still reading"), "{r}");
+}
+
+/// A raster drawn by classes under a mask, with more cells than its masked statistics read: the
+/// publication and a legend say its classes come from a sample; every class asked for (nothing
+/// to sample) or no mask (the band's own statistics, read whole) says nothing (#1679).
+#[test]
+fn a_masked_raster_too_large_to_read_whole_says_its_classes_are_sampled() {
+    use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+    use rustgis_map::raster::{RasterMask, RasterRenderer};
+    // 2049 × 2049 cells, over the 4,194,304 its masked statistics read whole.
+    let n = 2049usize;
+    let z: Vec<f32> = (0..n * n).map(|i| (1 + i * 4 / (n * n)) as f32).collect();
+    let gt = GeoTransform { origin_x: 0.0, origin_y: 10.0, pixel_width: 10.0 / n as f64, pixel_height: -10.0 / n as f64 };
+    let r = Raster::new("lc", n as u32, n as u32, vec![z], gt, Crs::LonLat, None, ColorHint::Gray, "UInt8").unwrap();
+    let mut rl = rustgis_map::RasterLayer::from_path(r, "lc.tif");
+    let values = (1..=4u8).map(|v| (f64::from(v), rustgis_map::Rgba::rgb(v * 50, 120, 200))).collect();
+    rl.style.renderer = RasterRenderer::UniqueValues { band: 0, ramp: rustgis_map::Ramp::Harbour, values };
+    rl.style.mask = RasterMask { values: vec![1.0], ..RasterMask::default() };
+    let mut s = Session::new(Project::default());
+    crate::cmd::raster::add_raster(&mut s, "Classes", rl).unwrap();
+    let sampled = "1 raster(s) drawn by classes under a mask have more cells than their masked statistics read, so the legend lists the classes of a sample and may miss a rare one the map draws: Classes";
+    let said = |s: &Session, mark| -> Vec<String> {
+        s.notices_since(mark).iter().filter(|n| n.text.contains("classes of a sample")).map(|n| n.text.clone()).collect()
+    };
+    let p = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let r = s.run("layout.publication", &p).unwrap();
+    let warnings: Vec<String> = serde_json::from_value(r["warnings"].clone()).unwrap();
+    assert_eq!(warnings.iter().filter(|w| w.contains("classes of a sample")).collect::<Vec<_>>(), [sampled], "{r}");
+    let mark = s.notice_mark();
+    let id = s.run("layout.addElement", &json!({"kind": "legend"})).unwrap()["element"].as_u64().unwrap();
+    assert_eq!(said(&s, mark), [sampled]);
+    // Every class asked for: the renderer's classes, not a sample's.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "allClasses": true})).unwrap();
+    assert!(said(&s, mark).is_empty(), "{:?}", s.notices_since(mark));
+    // No mask: the band's own statistics, read whole.
+    s.map_mut().layers[0].raster.as_mut().unwrap().style.mask = RasterMask::default();
+    let r = s.run("layout.publication", &p).unwrap();
+    assert!(!r["warnings"].to_string().contains("classes of a sample"), "{r}");
+}
+
+/// A land cover with more classes than its legend's box holds: the publication says it leaves the
+/// last out, and so does a legend added in a small box; five classes fit, and nothing is said
+/// (#1679).
+#[test]
+fn a_legend_with_too_many_raster_classes_says_it_leaves_some_out() {
+    let names: Vec<String> = (1..=200).map(|v| format!("Classe {v}")).collect();
+    let classes: Vec<(u8, &str)> = names.iter().enumerate().map(|(i, n)| (i as u8 + 1, n.as_str())).collect();
+    let publication = json!({"profile": "a4-portrait", "extent": [0, 0, 10, 10], "author": "", "locator": "none"});
+    let legend = json!({"kind": "legend", "x": 10, "y": 10, "w": 60, "h": 60, "columns": 2});
+    for (n, cut) in [(200, true), (5, false)] {
+        let mut s = Session::new(Project::default());
+        add_land_cover(&mut s, "Uso do solo", &classes[..n]);
+        let r = s.run("layout.publication", &publication).unwrap();
+        assert_eq!(r["warnings"].to_string().contains("more than fits its box"), cut, "{n} classes: {r}");
+        let mark = s.notice_mark();
+        s.run("layout.addElement", &legend).unwrap();
+        let said = s.notices_since(mark).iter().any(|n| n.text.contains("more than fits its box"));
+        assert_eq!(said, cut, "{n} classes: {:?}", s.notices_since(mark));
+    }
 }
 
 /// A smaller scale whose legend can't be measured (a streamed layer shown only there, whose file is
@@ -26840,7 +27283,7 @@ fn layout_shapes_are_added_restyled_and_saved() {
     s.run("layout.update", &json!({"element": line, "dir": "rising", "color": "#123456"})).unwrap();
     let l = &s.project.layouts[li];
     match &l.element(circle).unwrap().kind {
-        ElementKind::Ellipse { fill, outline, width } => {
+        ElementKind::Ellipse { fill, outline, width, .. } => {
             assert_eq!((fill.hex(), outline.hex(), *width), ("#00FF00".into(), "#0000FF".into(), 0.0))
         }
         k => panic!("{k:?}"),
@@ -27823,6 +28266,8 @@ fn copied_history_replays_public_structured_parameters_without_changing_results(
 #[path = "../../../tests/support/ogc_server.rs"]
 mod ogc_server;
 
+mod ogc_dataset;
+
 #[path = "../../../tests/support/esripbf.rs"]
 mod esripbf_answers;
 
@@ -27918,7 +28363,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
     }
     let error = session.run("service.layers", &json!({"url":root,"text":link(&format!("{root}?f=json"))})).unwrap_err();
     assert!(error.contains("loop"), "{error}");
-    let docs: Vec<Value> = (1..=3)
+    let docs: Vec<Value> = (1..=31)
         .map(|n| {
             json!({
                 "url":format!("https://example.org/ogc/{n}"),
@@ -27927,7 +28372,7 @@ fn ogc_landing_discovery_is_bounded_and_checks_addresses() {
         })
         .collect();
     let error = session.run("service.layers", &json!({"url":root,"text":link("https://example.org/ogc/1"),"documents":docs})).unwrap_err();
-    assert!(error.contains("four documents"), "{error}");
+    assert!(error.contains("32 documents"), "{error}");
     let docs = json!([
         {"url":"https://example.org/ogc/a","text":link("https://example.org/ogc/b")},
         {"url":"https://example.org/ogc/b","text":link("https://example.org/ogc/a")}
@@ -30877,6 +31322,100 @@ fn text_elements_take_italic_alignment_and_spacing() {
         assert!(s.run("layout.addElement", &add).is_err());
     }
     assert_eq!(style(&s, ocean), (false, TextAlign::Center, MAX_LETTER_SPACING));
+}
+
+/// Lines, arrows and the outlines of rectangles, ellipses and circles take a `dash` (#1763), read
+/// as a line layer's stroke reads one: kept through a save, `[]` or `null` solid again, refused
+/// when it isn't a pattern or for an element that draws no line, with nothing changed.
+#[test]
+fn lines_and_outlines_take_a_dash() {
+    use rustgis_map::layout::ElementKind;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Dashes"})).unwrap();
+    let dash = |s: &Session, id: u32| match s.project.layouts[0].element(id).map(|e| &e.kind) {
+        Some(ElementKind::Line { dash, .. } | ElementKind::Rectangle { dash, .. } | ElementKind::Ellipse { dash, .. }) => {
+            dash.map(|d| d.steps().to_vec())
+        }
+        _ => panic!("a line or a shape"),
+    };
+    let add = |s: &mut Session, p: Value| s.run("layout.addElement", &p).unwrap()["element"].as_u64().unwrap() as u32;
+    let arrow = add(&mut s, json!({"kind": "arrow", "dash": [4, 2]}));
+    let study = add(&mut s, json!({"kind": "rectangle", "x": 20, "y": 20, "w": 40, "h": 30, "dash": [3]}));
+    let circle = add(&mut s, json!({"kind": "circle", "dash": [1, 2]}));
+    let plain = add(&mut s, json!({"kind": "line"}));
+    assert_eq!(
+        (dash(&s, arrow), dash(&s, study), dash(&s, circle), dash(&s, plain)),
+        (Some(vec![4.0, 2.0]), Some(vec![3.0]), Some(vec![1.0, 2.0]), None)
+    );
+    let saved = serde_json::to_string(&s.project.layouts[0]).unwrap();
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&saved).unwrap();
+    assert_eq!(back, s.project.layouts[0]);
+    // Changed, made solid with [] or null, and left alone by an update that doesn't give it.
+    s.run("layout.update", &json!({"element": plain, "dash": [4, 2, 1, 2]})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "width": 3})).unwrap();
+    assert_eq!(dash(&s, plain), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    s.run("layout.update", &json!({"element": plain, "dash": []})).unwrap();
+    s.run("layout.update", &json!({"element": circle, "dash": null})).unwrap();
+    assert_eq!((dash(&s, plain), dash(&s, circle)), (None, None));
+    // Not a pattern: refused, said, nothing changed.
+    for bad in [json!("4 2"), json!(["a"]), json!([-1]), json!([0, 0]), json!([1, 1, 1, 1, 1, 1, 1, 1, 1]), json!([501])] {
+        let err = s.run("layout.update", &json!({"element": study, "dash": bad, "width": 5})).unwrap_err();
+        assert!(err.starts_with("dash is a list"), "{bad}: {err}");
+        assert!(s.run("layout.addElement", &json!({"kind": "line", "dash": bad})).is_err());
+    }
+    assert_eq!(dash(&s, study), Some(vec![3.0]));
+    // Only lines and shapes draw one.
+    let text = add(&mut s, json!({"kind": "text", "text": "Área de estudo"}));
+    assert!(s.run("layout.update", &json!({"element": text, "dash": [4, 2]})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "northArrow", "dash": [4, 2]})).unwrap_err().contains("dash"));
+    // Solid asked for with null is refused there too, not ignored.
+    assert!(s.run("layout.update", &json!({"element": text, "dash": null})).unwrap_err().contains("dash"));
+    assert!(s.run("layout.addElement", &json!({"kind": "text", "dash": null})).unwrap_err().contains("dash"));
+    // Locked, even a solid one asked for with null is refused.
+    s.run("layout.update", &json!({"element": arrow, "locked": true})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": arrow, "dash": null})).unwrap_err().contains("locked"));
+    assert_eq!(dash(&s, arrow), Some(vec![4.0, 2.0]));
+}
+
+/// Text elements turn by `rotation` (#1763): in degrees clockwise, kept within -180 to 180, not
+/// written when 0; a value that isn't a number is refused and changes nothing, as is a turn for an
+/// element that isn't a text.
+#[test]
+fn text_elements_take_a_rotation() {
+    use rustgis_map::layout::Element;
+    let mut s = Session::new(sample::world_project());
+    s.run("layout.new", &json!({"name": "Turned"})).unwrap();
+    let turn = |s: &Session, id: u32| s.project.layouts[0].element(id).map(Element::rotation).unwrap();
+    let add = |s: &mut Session, p: Value| s.run("layout.addElement", &p).unwrap()["element"].as_u64().unwrap() as u32;
+    let plain = add(&mut s, json!({"kind": "text", "text": "Brasil"}));
+    assert_eq!(turn(&s, plain), 0.0);
+    assert!(!serde_json::to_string(&s.project.layouts[0]).unwrap().contains("rotation"), "an upright text writes no turn");
+    let source = add(&mut s, json!({"kind": "text", "text": "Fonte: IBGE", "rotation": -90}));
+    assert_eq!(turn(&s, source), -90.0);
+    let dynamic = add(&mut s, json!({"kind": "dynamicText", "rotation": "90"}));
+    assert_eq!(turn(&s, dynamic), 90.0);
+    s.run("layout.update", &json!({"element": plain, "rotation": 450})).unwrap();
+    assert_eq!(turn(&s, plain), 90.0);
+    s.run("layout.update", &json!({"element": plain, "rotation": -270})).unwrap();
+    assert_eq!(turn(&s, plain), 90.0);
+    let back: rustgis_map::layout::Layout = serde_json::from_str(&serde_json::to_string(&s.project.layouts[0]).unwrap()).unwrap();
+    assert_eq!(back.element(source).map(Element::rotation), Some(-90.0));
+    // Not a number: refused, said, and nothing changes.
+    let err = s.run("layout.update", &json!({"element": plain, "rotation": "x", "text": "Changed"})).unwrap_err();
+    assert!(err.contains("rotation"), "{err}");
+    assert_eq!(turn(&s, plain), 90.0);
+    assert!(
+        matches!(&s.project.layouts[0].element(plain).unwrap().kind, rustgis_map::layout::ElementKind::Text { text, .. } if text == "Brasil")
+    );
+    assert!(s.run("layout.addElement", &json!({"kind": "text", "rotation": [90]})).unwrap_err().contains("rotation"));
+    // Only a text turns.
+    let rect = add(&mut s, json!({"kind": "rectangle", "x": 10, "y": 10, "w": 20, "h": 20}));
+    assert!(s.run("layout.update", &json!({"element": rect, "rotation": 45})).unwrap_err().contains("rotation"));
+    assert!(s.run("layout.addElement", &json!({"kind": "rectangle", "rotation": 45})).unwrap_err().contains("rotation"));
+    // null leaves it as it is.
+    s.run("layout.update", &json!({"element": plain, "rotation": null})).unwrap();
+    assert_eq!(turn(&s, plain), 90.0);
 }
 
 /// Text elements take a font family (#517): sans by default and not written then, serif when
@@ -39501,6 +40040,132 @@ fn interpolation_says_the_features_it_leaves_out() {
     assert!(e.contains("(2 features with no geometry or no usable point, 1 whose value isn't a number left out)"), "{e}");
 }
 
+/// The Geostatistical Wizard makes its surface in a projected system (#1743): the one given as
+/// `crs`, else the environment's (`gp.env` `crs`, with a cell size in its units). Without either it
+/// stays in degrees, and says so for a layer read in a projected system. The environment keeps its
+/// system apart from the degree cell size an older RustGIS reads, and saves it with the project.
+#[test]
+fn interpolation_in_a_projected_coordinate_system() {
+    use rustgis_data::raster::Crs;
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    use rustgis_geom::Coord;
+    let mut s = world();
+    // Wells around Memphis, read in UTM zone 16N.
+    let mut wells = Dataset::new("wells", GeometryType::Point, vec![Field::new("depth", FieldType::Double)]);
+    for (x, y, depth) in [(-90.05, 35.10, 10.0), (-89.95, 35.10, 20.0), (-90.05, 35.20, 30.0), (-89.95, 35.20, 40.0)] {
+        wells.push(Some(Geometry::Point(Coord::new(x, y))), vec![V::Float(depth)]);
+    }
+    wells.crs = Some(Crs::Epsg(32616));
+    crate::cmd::layer::add_dataset(&mut s, wells);
+    let surface = |s: &mut Session, p: Value| {
+        let mark = s.notice_mark();
+        let v = s.run("analysis.interpolate", &p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        let notices: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+        let r = s.map().layer(v["layer"].as_u64().unwrap() as u32).unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+        (r.crs, r.transform.pixel_width, notices)
+    };
+    let in_degrees = |notices: &[String]| notices.iter().any(|n| n.contains("made in degrees") && n.contains(&Crs::Epsg(32616).label()));
+
+    let (crs, cell, notices) = surface(&mut s, json!({"layer": "wells", "field": "depth", "crs": "EPSG:32616", "cellSize": 500}));
+    assert_eq!((crs, cell), (Crs::Epsg(32616), 500.0));
+    assert!(!in_degrees(&notices), "{notices:?}");
+    let (crs, cell, notices) = surface(&mut s, json!({"layer": "wells", "field": "depth", "cellSize": 0.01}));
+    assert_eq!((crs, cell), (Crs::LonLat, 0.01));
+    assert!(in_degrees(&notices), "{notices:?}");
+
+    // The environment's system, with its cell size in metres; its degree cell size stays apart.
+    let env = s.run("gp.env", &json!({"crs": "EPSG:32616", "cellSize": 250})).unwrap();
+    assert_eq!((env["cellSize"].clone(), env["projected"]["cellSize"].clone()), (Value::Null, json!(250.0)), "{env}");
+    assert_eq!(env["projected"]["crs"], "EPSG:32616", "{env}");
+    let (crs, cell, notices) = surface(&mut s, json!({"layer": "wells", "field": "depth"}));
+    assert_eq!((crs, cell), (Crs::Epsg(32616), 250.0));
+    assert!(!in_degrees(&notices), "{notices:?}");
+    // An empty `crs` is none given: the environment's still applies.
+    let (crs, cell, _) = surface(&mut s, json!({"layer": "wells", "field": "depth", "crs": ""}));
+    assert_eq!((crs, cell), (Crs::Epsg(32616), 250.0));
+    // EPSG:4326 asks for degrees over the environment's system.
+    let (crs, _, _) = surface(&mut s, json!({"layer": "wells", "field": "depth", "crs": "EPSG:4326", "cellSize": 0.01}));
+    assert_eq!(crs, Crs::LonLat);
+    // The run's own cell size wins over the environment's.
+    let (_, cell, _) = surface(&mut s, json!({"layer": "wells", "field": "depth", "cellSize": 500}));
+    assert_eq!(cell, 500.0);
+    let saved = serde_json::to_value(&s.project.gp_env).unwrap();
+    assert_eq!(saved["cell_size"], Value::Null, "{saved}");
+    assert_eq!(serde_json::from_value::<crate::project::GpEnvironment>(saved).unwrap(), s.project.gp_env);
+    // A whole project opened again keeps the system and its cell size, with nothing to say.
+    let mut reopened = Project::from_json(&serde_json::to_string(&s.project).unwrap()).unwrap();
+    assert_eq!(reopened.gp_env, s.project.gp_env);
+    assert!(reopened.take_read_notices(&[crate::project::ReadPart::Items]).is_empty());
+    // A system given to the run wins, and the environment's cell size isn't read in another one.
+    let (crs, mercator_cell, _) = surface(&mut s, json!({"layer": "wells", "field": "depth", "crs": "EPSG:3857"}));
+    assert_eq!(crs, Crs::WebMercator);
+
+    // The same system again keeps its cell size; a bad call changes nothing.
+    s.run("gp.env", &json!({"crs": "EPSG:32616"})).unwrap();
+    assert_eq!(s.project.gp_env.cell_in(Crs::Epsg(32616)), Some(250.0));
+    let before = s.project.gp_env.clone();
+    assert!(s.run("gp.env", &json!({"extent": [0, 0, 1, 1], "crs": "EPSG:3857", "cellSize": -1})).is_err());
+    assert_eq!(s.project.gp_env, before, "the extent set before the refusal is rolled back too");
+    assert!(s.run("gp.env", &json!({"crs": "EPSG:4326", "cellSize": 100})).is_err());
+    assert_eq!(s.project.gp_env, before);
+
+    // A point Web Mercator can't hold is left out and counted; the others make the surface.
+    let mut polar = Dataset::new("polar", GeometryType::Point, vec![Field::new("depth", FieldType::Double)]);
+    for (x, y, depth) in [(-90.05, 35.10, 10.0), (-89.95, 35.20, 20.0), (0.0, 89.0, 30.0)] {
+        polar.push(Some(Geometry::Point(Coord::new(x, y))), vec![V::Float(depth)]);
+    }
+    crate::cmd::layer::add_dataset(&mut s, polar);
+    let (crs, _, notices) = surface(&mut s, json!({"layer": "polar", "field": "depth", "crs": "EPSG:3857"}));
+    assert_eq!(crs, Crs::WebMercator);
+    // Both points left make it: its values reach from near one's to near the other's.
+    let polar = s.map().layer_by_name("polar_depth_idw").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let values: Vec<f32> = polar.bands[0].data.iter().copied().filter(|v| polar.is_valid(*v)).collect();
+    let (low, high) = values.iter().fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+    assert!(low < 12.0 && high > 18.0 && high <= 20.0, "{low}..{high}");
+    let label = Crs::WebMercator.label();
+    let beyond = format!("polar: 1 point(s) beyond what {label} can hold (past 85.05° of latitude) were left out");
+    assert!(notices.contains(&beyond), "{notices:?}");
+
+    // Degrees are refused as a system; clearing the environment's goes back to degrees.
+    assert!(s.run("analysis.interpolate", &json!({"layer": "wells", "field": "depth", "crs": "EPSG:4269"})).is_err());
+    assert!(s.run("gp.env", &json!({"crs": "EPSG:4326"})).is_err());
+    assert!(s.run("gp.env", &json!({"crs": 32616})).is_err());
+    assert!(s.run("gp.env", &json!({"crs": "EPSG:4978"})).is_err(), "geocentric");
+    s.run("gp.env", &json!({"crs": null})).unwrap();
+    assert_eq!(s.project.gp_env.projected, None);
+    // The run in another system above took its own cell size, as it does with no environment.
+    let (_, cell, _) = surface(&mut s, json!({"layer": "wells", "field": "depth", "crs": "EPSG:3857"}));
+    assert_eq!(cell, mercator_cell);
+    assert!(s.run("gp.env", &json!({"cellSize": 500})).is_err(), "500 degrees");
+
+    // A hand-edited project whose environment system is in degrees opens without it, and says so.
+    let mut env = serde_json::to_value(crate::project::GpEnvironment::default()).unwrap();
+    env["projected"] = json!({"crs": "LonLat", "cell_size": 250.0});
+    let mut text = serde_json::to_value(&s.project).unwrap();
+    text["gp_env"] = env;
+    let mut opened = Project::from_json(&text.to_string()).unwrap();
+    assert_eq!(opened.gp_env.projected, None);
+    let said = opened.take_read_notices(&[crate::project::ReadPart::Items]);
+    assert!(format!("{said:?}").contains("environment's coordinate system"), "{said:?}");
+    // So does a geocentric system, and a cell size that isn't above 0 (the system kept).
+    let mut text = serde_json::to_value(&s.project).unwrap();
+    text["gp_env"]["projected"] = json!({"crs": {"Epsg": 4978}, "cell_size": 250.0});
+    let mut opened = Project::from_json(&text.to_string()).unwrap();
+    assert_eq!(opened.gp_env.projected, None);
+    assert!(format!("{:?}", opened.take_read_notices(&[crate::project::ReadPart::Items])).contains("isn't a projected one"));
+    // And a code this version has no definition for.
+    text["gp_env"]["projected"] = json!({"crs": {"Epsg": 1}, "cell_size": 250.0});
+    let mut opened = Project::from_json(&text.to_string()).unwrap();
+    assert_eq!(opened.gp_env.projected, None);
+    assert!(format!("{:?}", opened.take_read_notices(&[crate::project::ReadPart::Items])).contains("isn't a projected one"));
+    text["gp_env"]["projected"] = json!({"crs": {"Epsg": 32616}, "cell_size": -5.0});
+    let mut opened = Project::from_json(&text.to_string()).unwrap();
+    assert_eq!(opened.gp_env.projected.map(|g| (g.crs, g.cell_size)), Some((Crs::Epsg(32616), None)));
+    assert!(format!("{:?}", opened.take_read_notices(&[crate::project::ReadPart::Items])).contains("isn't above 0"));
+    let clean = Project::from_json(&serde_json::to_string(&s.project).unwrap()).unwrap();
+    assert!(clean.read_notices.is_empty(), "{:?}", clean.read_notices);
+}
+
 /// `share.exportMap` to a `.tif` writes the view placed on the ground (#1561): in the map's
 /// projection, each pixel where the view drew it, RGB; a turned view north up over its box, and
 /// says so; a tilted view, the globe and junk refused.
@@ -40613,6 +41278,15 @@ fn long_commands_stop_when_cancelled_while_they_run() {
         let run = crate::cmd::exports::export_start(&mut s, command, p).unwrap_or_else(|e| panic!("{command}: {e}"));
         let control = Control::cancelled_once_started();
         note(command, run.run(&control).map(|_| ()), &control);
+    }
+
+    // The Add Service dialog replays supplied metadata off the desktop frame too.
+    let params = json!({"url":"https://maps.example.org/dataset","type":"ogcapi","text":"{\"collections\":[]}"});
+    for command in ["service.layers", "service.add"] {
+        let read = crate::cmd::reads::read_ahead(&mut s, command, &params).unwrap();
+        assert!(read.reads());
+        let control = Control::cancelled_once_started();
+        note(command, read.run(&control).map(|_| ()), &control);
     }
 
     // The tools whose work grows past a second or two on real data: buffers, overlays, joins,
