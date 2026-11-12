@@ -67,15 +67,27 @@ pub fn archive_revisions(layout: &Layout, maps: &[Map]) -> crate::ArchiveRevisio
 /// Renders a layout at `dpi` (dots per inch). `maps` are the project's maps, found by name.
 /// Refuses a linked archive changed while composing the page, including its different map frames.
 pub fn render(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<Pixmap, String> {
-    render_pending(layout, maps, dpi, info).map(|(pm, _)| pm)
+    render_page(layout, maps, dpi, info, true).map(|(pm, _)| pm)
 }
 
 /// [`render`], and whether a map frame on the page drew while some of its tiles, or a read of its
 /// streamed layers or rasters, were still on their way: in the browser, which doesn't wait for
 /// them, the page is drawn again once they land.
+/// Drawn for the Layout view on the interface's thread, its frames don't wait for cast shadows
+/// still being worked out: [`crate::shadows_said`] says so, and the page is drawn again as they
+/// land (natively too, where its tiles were waited for).
 pub fn render_pending(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo) -> Result<(Pixmap, bool), String> {
+    render_page(layout, maps, dpi, info, false)
+}
+
+/// [`render_pending`], its frames waiting for cast shadows when `wait_shadows` (an export).
+fn render_page(layout: &Layout, maps: &mut [Map], dpi: f64, info: &PageInfo, wait_shadows: bool) -> Result<(Pixmap, bool), String> {
     let revisions = archive_revisions(layout, maps);
-    let result = render_pending_inner(layout, maps, dpi, info);
+    let result = if wait_shadows {
+        render_pending_inner(layout, maps, dpi, info)
+    } else {
+        crate::without_shadow_wait(|| render_pending_inner(layout, maps, dpi, info))
+    };
     revisions.finish_revision(archive_revisions(layout, maps), result, "the page is too large to draw")
 }
 
@@ -349,7 +361,7 @@ fn draw_page(
                     None => placeholder(&mut pm, r, "Colorbar", ppp),
                 }
             }
-            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name } => {
+            ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name, rotation } => {
                 let first = layout.first_frame().and_then(frame);
                 let s = expand(t, layout, info, first.and_then(|f| maps.get(f.1).map(|m| (m, f.2))));
                 // An installed family by name (#762), else its generic one. The app doesn't wait
@@ -358,7 +370,13 @@ fn draw_page(
                 let family = font_name.as_deref().and_then(crate::families::find_ready);
                 let face = text::Face { bold: *bold, italic: *italic, serif: *font == rustgis_map::layout::FontFamily::Serif, family };
                 let style = TextStyle { face, align: *align, spacing: *letter_spacing as f32 };
-                text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
+                if *rotation == 0.0 {
+                    text_block(&mut pm, r, &s, *size as f32, *color, style, ppp);
+                } else if let Some(area) = text_area(r, &s, *size as f32, style, ppp) {
+                    draw_turned_box(&mut pm, r, *rotation as f32, area, |c, r, k| {
+                        text_block(c, r, &s, *size as f32, *color, style, ppp * k)
+                    });
+                }
             }
             ElementKind::Picture { image } => {
                 if let Some(img) = crate::picture::decode(image) {
@@ -392,7 +410,7 @@ fn draw_page(
                     None => placeholder(&mut pm, r, "Chart", ppp),
                 }
             }
-            ElementKind::Rectangle { fill, outline, width, radius } => {
+            ElementKind::Rectangle { fill, outline, width, radius, dash } => {
                 // Square corners filled as before, so an existing layout draws to the same pixels.
                 let rounded = rounded_rect(r, (*radius * PT_PER_MM * ppp) as f32);
                 match &rounded {
@@ -401,25 +419,20 @@ fn draw_page(
                 }
                 let p = rounded.unwrap_or_else(|| PathBuilder::from_rect(r));
                 if *width > 0.0 {
-                    pm.stroke_path(
-                        &p,
-                        &paint(*outline, 1.0),
-                        &Stroke { width: (*width as f32) * ppp as f32, ..Stroke::default() },
-                        Transform::identity(),
-                        None,
-                    );
+                    let stroke = dashed(Stroke { width: (*width as f32) * ppp as f32, ..Stroke::default() }, dash.as_ref(), ppp, &p);
+                    pm.stroke_path(&p, &paint(*outline, 1.0), &stroke, Transform::identity(), None);
                 }
             }
-            ElementKind::Ellipse { fill, outline, width } => {
+            ElementKind::Ellipse { fill, outline, width, dash } => {
                 if let Some(p) = PathBuilder::from_oval(r) {
                     pm.fill_path(&p, &paint(*fill, 1.0), FillRule::Winding, Transform::identity(), None);
                     if *width > 0.0 {
-                        let stroke = Stroke { width: (*width as f32) * ppp as f32, ..Stroke::default() };
+                        let stroke = dashed(Stroke { width: (*width as f32) * ppp as f32, ..Stroke::default() }, dash.as_ref(), ppp, &p);
                         pm.stroke_path(&p, &paint(*outline, 1.0), &stroke, Transform::identity(), None);
                     }
                 }
             }
-            ElementKind::Line { color, width, dir, head } => {
+            ElementKind::Line { color, width, dir, head, dash } => {
                 let [(x0, y0), (x1, y1)] = dir.ends((r.x().into(), r.y().into(), r.width().into(), r.height().into()));
                 let (a, b) = ((x0 as f32, y0 as f32), (x1 as f32, y1 as f32));
                 let stroke_w = ((*width as f32) * ppp as f32).max(0.5);
@@ -443,7 +456,8 @@ fn draw_page(
                 pb.move_to(s0.0, s0.1);
                 pb.line_to(s1.0, s1.1);
                 if let Some(p) = pb.finish() {
-                    let stroke = Stroke { width: stroke_w, ..Stroke::default() };
+                    // Only the shaft is dashed: the heads below are filled.
+                    let stroke = dashed(Stroke { width: stroke_w, ..Stroke::default() }, dash.as_ref(), ppp, &p);
                     pm.stroke_path(&p, &paint(*color, 1.0), &stroke, Transform::identity(), None);
                 }
                 // Each head: a filled triangle, its tip on the line's end.
@@ -490,8 +504,13 @@ fn frame_canvas(
     grid: Option<(&Grid, bool)>,
 ) -> Option<Canvas> {
     let view = View { width: w, height: h, pixels_per_point: ppp, camera, sky: false };
-    let img = if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }?;
-    *pending |= img.tiles_pending || img.data_pending;
+    // Why its layers were drawn without their cast shadows is kept for the page's caller (see
+    // `crate::shadows_said`).
+    let (img, shadows) = crate::frame_with_shadows_to_come(|| {
+        if record { crate::render_complete_recorded(map, &view) } else { crate::render_complete(map, &view) }
+    });
+    let img = img?;
+    *pending |= img.tiles_pending || img.data_pending || shadows;
     Some(finish_frame(img, ppp, grid.map(|(g, comma)| (&*map, &view, g, comma))))
 }
 
@@ -593,6 +612,14 @@ pub fn expand(t: &str, layout: &Layout, info: &PageInfo, frame: Option<(&Map, ru
         },
     };
     rustgis_map::graphics::expand(&t, &v)
+}
+
+/// `stroke` dashed along `path` by an element's pattern (points, at `ppp` pixels a point), as a
+/// line layer's stroke is ([`crate::dash_steps`]): solid when it has none, or when the pattern is
+/// under a pixel a round or would cut the path into too many dashes.
+fn dashed(stroke: Stroke, dash: Option<&rustgis_map::symbology::Dash>, ppp: f64, path: &tiny_skia::Path) -> Stroke {
+    let dash = dash.and_then(|d| crate::dash_steps(d, ppp as f32, path)).and_then(|steps| tiny_skia::StrokeDash::new(steps, 0.0));
+    Stroke { dash, ..stroke }
 }
 
 /// A rectangle with its corners rounded by `rad` pixels (at most half its shorter side), each a
@@ -2448,6 +2475,71 @@ pub fn line_pitch_mm(size: f64) -> f64 {
     size.clamp(2.0, 400.0) * 1.33 * 1.25 * 25.4 / 96.0
 }
 
+/// The part of a text element's box (pixels, from its top-left corner) [`text_block`] inks, a line's
+/// height more each way: across, its lines as each is aligned (past the box where one overruns
+/// it); down, its lines, or the box and the line [`text_block`] still draws past it. `None` when
+/// it has no line.
+fn text_area(r: Rect, s: &str, size: f32, style: TextStyle, ppp: f64) -> Option<Rect> {
+    let px = size.clamp(2.0, 400.0) * 1.33 * ppp as f32;
+    let spacing = style.spacing * 1.33 * ppp as f32;
+    let w = r.width();
+    let (mut x0, mut x1, mut lines) = (f32::INFINITY, f32::NEG_INFINITY, 0u16);
+    for line in s.lines().take(200) {
+        let (lo, hi) = text::styled_extent(line, px, style.face, spacing);
+        // Where `text_block` puts the ink: from the edge (left), or by the ink (centre, right).
+        let (a, b) = match style.align {
+            TextAlign::Left => (lo, hi),
+            TextAlign::Center => ((w - (hi - lo)) / 2.0, (w + (hi - lo)) / 2.0),
+            TextAlign::Right => (w - (hi - lo), w),
+        };
+        (x0, x1, lines) = (x0.min(a), x1.max(b), lines + 1);
+    }
+    let down = (r.height() + px).min(f32::from(lines) * px * 1.25);
+    (lines > 0).then(|| Rect::from_ltrb(x0 - px, -px, x1 + px, down + px)).flatten()
+}
+
+/// Draws with `draw` (given the box to draw in and how many of the page's pixels one of its own
+/// is) turned `degrees` clockwise about the centre of `r`: kept turned on a recording canvas (a
+/// vector PDF), else drawn upright in a picture of `area` (pixels from the box's top-left corner:
+/// what it inks), which is placed turned. A picture past the page's budget is drawn at a lower
+/// resolution and scaled up, as a frame that large is. Its size is at least a pixel and at most
+/// the budget, and `r` and `area` have a size, so the picture is always made.
+///
+/// A quarter turn at full resolution maps the picture's pixels one for one onto the page's: it is
+/// placed on whole pixels and not filtered, the part of a pixel that moved it drawn into the
+/// picture instead, so its text is sampled once, as upright text is, and keeps as sharp. Another
+/// turn is sampled once more, by the turn.
+fn draw_turned_box(pm: &mut Canvas, r: Rect, degrees: f32, area: Rect, draw: impl FnOnce(&mut Canvas, Rect, f64)) {
+    let (cx, cy) = (r.x() + r.width() / 2.0, r.y() + r.height() / 2.0);
+    if pm.is_recording() {
+        pm.with_transform(Transform::from_rotate_at(degrees, cx, cy), |c| draw(c, r, 1.0));
+        return;
+    }
+    let (w, h) = (f64::from(area.width()), f64::from(area.height()));
+    let k = (MAX_PIXELS / (w * h)).sqrt().min(MAX_SIDE / w.max(h)).min(1.0) as f32;
+    let (pw, ph) = ((w as f32 * k).ceil().max(1.0), (h as f32 * k).ceil().max(1.0));
+    let mut place =
+        Transform::from_scale(1.0 / k, 1.0 / k).post_translate(r.x() + area.x(), r.y() + area.y()).post_rotate_at(degrees, cx, cy);
+    let quarter = k == 1.0 && degrees.rem_euclid(90.0) == 0.0;
+    let (mut dx, mut dy) = (0.0, 0.0);
+    if quarter {
+        // Its turn exactly (0 or ±1 each way), and its corner on a whole pixel: the picture's
+        // content moves back by as much, turned back (the turn's inverse is its transpose).
+        let [sx, ky, kx, sy] = [place.sx, place.ky, place.kx, place.sy].map(f32::round);
+        let (ex, ey) = (place.tx.round() - place.tx, place.ty.round() - place.ty);
+        (dx, dy) = (-(sx * ex + ky * ey), -(kx * ex + sy * ey));
+        place = Transform::from_row(sx, ky, kx, sy, place.tx.round(), place.ty.round());
+    }
+    // The box in the picture: its corner `area`'s offset away from the picture's (and less than a
+    // pixel more, within the room `area` leaves round the ink).
+    let inner = Rect::from_xywh(-area.x() * k + dx, -area.y() * k + dy, r.width() * k, r.height() * k);
+    let (Some(mut pic), Some(inner)) = (Canvas::new(pw as u32, ph as u32), inner) else { return };
+    draw(&mut pic, inner, f64::from(k));
+    let quality = if quarter { tiny_skia::FilterQuality::Nearest } else { tiny_skia::FilterQuality::Bilinear };
+    let paint = PixmapPaint { quality, ..PixmapPaint::default() };
+    pm.draw_pixmap(0, 0, pic.pixmap().as_ref(), &paint, place, None);
+}
+
 /// Text in an element: lines split at `\n` from the top, each placed by the style's alignment. A
 /// centred or right-aligned line wider than the element runs out past its left edge, as a
 /// left-aligned one runs past its right.
@@ -3361,6 +3453,108 @@ mod tests {
         render(&l, &mut [map.clone()], 96.0, &PageInfo::default()).unwrap()
     }
 
+    /// A page whose frame draws a layer without its cast shadows says why, named by the layer; one
+    /// with them, or without any asked for, says nothing.
+    #[test]
+    fn a_page_says_why_a_frame_drew_no_cast_shadows() {
+        let relief = |shadow| rustgis_map::raster::RasterRenderer::ShadedRelief {
+            band: 0,
+            ramp: None,
+            azimuth: 315.0,
+            altitude: 30.0,
+            z_factor: 1.0,
+            shadow,
+        };
+        for shadow in [0.0, 1.0] {
+            let map = ramp_map(relief(shadow), rustgis_map::raster::Stretch::MinMax);
+            let (_, said) = crate::shadows_said(|| colorbar_page(&map, Orientation::Horizontal, false, ""));
+            assert!(said.notices.is_empty() && !said.to_come, "shadow {shadow}: {said:?}");
+        }
+        // Read in place with only its overview held: no whole grid to trace.
+        let mut map = ramp_map(relief(1.0), rustgis_map::raster::Stretch::MinMax);
+        let rl = map.layers.iter_mut().find_map(|l| l.raster.as_mut()).unwrap();
+        rl.in_place = true;
+        let mut r = (**rl.data.as_ref().unwrap()).clone();
+        r.overview = Some((1000, 10));
+        rl.data = Some(std::sync::Arc::new(r));
+        let (_, said) = crate::shadows_said(|| colorbar_page(&map, Orientation::Horizontal, false, ""));
+        let said = said.notices;
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("dem: ") && said[0].contains("read in place"), "{said:?}");
+        // What the map view's frame said is not a page's: a clean page drawn after it says nothing.
+        let camera =
+            rustgis_map::Camera { center: rustgis_geom::lonlat_to_merc(Coord::new(0.5, 0.5)), res: 2000.0, bearing: 0.0, pitch: 0.0 };
+        crate::render(&mut map, &crate::View { width: 64.0, height: 64.0, pixels_per_point: 1.0, camera, sky: false });
+        let clean = ramp_map(relief(0.0), rustgis_map::raster::Stretch::MinMax);
+        let (_, said) = crate::shadows_said(|| colorbar_page(&clean, Orientation::Horizontal, false, ""));
+        assert!(said.notices.is_empty(), "{said:?}");
+    }
+
+    /// A page with maps showing copies of one relief (each layer the first of its map, so with the
+    /// same id), each under its own sun, drawn again until it has no shadows to come, as the
+    /// Layout view draws it while they land. Panics if it never settles.
+    fn page_settles_with_suns(suns: &[f64]) {
+        use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
+        let n = 300usize;
+        let heights: Vec<f32> = (0..n * n).map(|i| (((i % n) as f32 / 9.0).sin() + ((i / n) as f32 / 7.0).cos()) * 400.0).collect();
+        let gt = GeoTransform { origin_x: -1.0, origin_y: 1.0, pixel_width: 2.0 / n as f64, pixel_height: -2.0 / n as f64 };
+        let dem = Raster::new("dem", n as u32, n as u32, vec![heights], gt, Crs::LonLat, None, ColorHint::Gray, "Float32").unwrap();
+        let rl = rustgis_map::raster::RasterLayer::from_path(dem, "dem.tif");
+        let mut maps = Vec::new();
+        let mut l = Layout::new("Layout", 100.0, 100.0);
+        for (i, azimuth) in suns.iter().enumerate() {
+            let name = format!("m{i}");
+            let mut copy = rl.clone();
+            copy.style.renderer = rustgis_map::raster::RasterRenderer::ShadedRelief {
+                band: 0,
+                ramp: None,
+                azimuth: *azimuth,
+                altitude: 10.0,
+                z_factor: 1.0,
+                shadow: 1.0,
+            };
+            let mut m = Map::new(name.clone());
+            assert_eq!(m.add_raster("dem", copy), 1);
+            maps.push(m);
+            let frame = ElementKind::MapFrame {
+                map: name.clone(),
+                center: Coord::new(0.0, 0.0),
+                scale: 1e7,
+                shape: FrameShape::Rectangle,
+                grid: None,
+                extent_of: None,
+                extent_color: rustgis_map::layout::INDICATOR_COLOR,
+                extent_width: rustgis_map::layout::INDICATOR_WIDTH,
+                bearing: 0.0,
+                pitch: 0.0,
+            };
+            l.add(&name, (5.0 + 20.0 * i as f64, 5.0, 18.0, 18.0), frame);
+        }
+        let start = std::time::Instant::now();
+        loop {
+            let (drawn, said) = crate::shadows_said(|| render_pending(&l, &mut maps, 48.0, &PageInfo::default()));
+            drawn.unwrap();
+            assert!(said.notices.is_empty(), "{said:?}");
+            if !said.to_come {
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(60), "the page never got its shadows");
+            std::thread::yield_now();
+        }
+    }
+
+    /// Two maps lit otherwise on a page: neither map's grid stops the other's.
+    #[test]
+    fn two_maps_lit_otherwise_on_a_page_keep_their_own_shadows() {
+        page_settles_with_suns(&[315.0, 135.0]);
+    }
+
+    /// More maps lit otherwise than the grids kept for going back: none is let go while it is drawn.
+    #[test]
+    fn many_maps_lit_otherwise_on_a_page_all_get_their_shadows() {
+        page_settles_with_suns(&[315.0, 135.0, 45.0, 225.0, 0.0]);
+    }
+
     /// A map with one 100 × 1 raster valued 0–99 by column, styled by `renderer`.
     fn ramp_map(renderer: rustgis_map::raster::RasterRenderer, stretch: rustgis_map::raster::Stretch) -> Map {
         use rustgis_data::raster::{ColorHint, Crs, GeoTransform, Raster};
@@ -3430,6 +3624,274 @@ mod tests {
     fn text_height(pm: &Pixmap) -> u32 {
         let rows: Vec<u32> = (0..pm.height()).filter(|&y| (0..pm.width()).any(|x| rgb(pm, x, y).0 < 128)).collect();
         rows[rows.len() - 1] - rows[0]
+    }
+
+    /// A page with `kind` in (10, 10, 80, 30) mm on white.
+    fn shape_page(kind: ElementKind) -> Layout {
+        let mut l = Layout::new("L", 100.0, 50.0);
+        l.add("Shape", (10.0, 10.0, 80.0, 30.0), kind);
+        l
+    }
+
+    /// The runs of inked and blank pixels along a row (or a column) from `from` to `to`: how many
+    /// times it goes from ink to blank.
+    fn gaps(pm: &Pixmap, along: impl Iterator<Item = (u32, u32)>) -> usize {
+        let ink: Vec<bool> = along.map(|(x, y)| rgb(pm, x, y).0 < 128).collect();
+        ink.windows(2).filter(|w| w[0] && !w[1]).count()
+    }
+
+    /// A dashed line has gaps where its pattern says, its arrowhead solid; a dashed rectangle's
+    /// outline has gaps on all four sides; solid, both draw as before (#1763).
+    #[test]
+    fn dashed_lines_and_outlines_have_gaps() {
+        use rustgis_map::layout::LineDir;
+        let black = Rgba::rgb(0, 0, 0);
+        let dash = rustgis_map::symbology::Dash::new(&[6.0, 6.0]);
+        let png = |kind: ElementKind| render(&shape_page(kind), &mut [], 96.0, &PageInfo::default()).unwrap();
+        // 96 dpi: 1 mm is 3.78 px. The line runs along y = 25 mm from x = 10 to 90 mm.
+        let px = |mm: f64| (mm * 96.0 / 25.4).round() as u32;
+        let line = |dash, head| ElementKind::Line { color: black, width: 2.0, dir: LineDir::Horizontal, head, dash };
+        let along = |pm: &Pixmap| gaps(pm, (px(11.0)..px(80.0)).map(|x| (x, px(25.0))));
+        assert_eq!(along(&png(line(None, LineHead::None))), 0, "solid");
+        // 69 mm is about 261 points (PT_PER_MM): a 12-point round each, so some 22 gaps.
+        let dashed = png(line(dash, LineHead::End));
+        assert!((20..=24).contains(&along(&dashed)), "{} gaps", along(&dashed));
+        // The head (the last 6 + 2.5 × 2 = 11 points, 2.9 mm) is filled: no gap across it.
+        assert_eq!(gaps(&dashed, (px(87.5)..px(89.8)).map(|x| (x, px(25.0)))), 0, "the arrowhead stays solid");
+        let rect = |dash| ElementKind::Rectangle { fill: Rgba::new(0, 0, 0, 0), outline: black, width: 2.0, radius: 0.0, dash };
+        let sides = |pm: &Pixmap| {
+            let (x0, x1, y0, y1) = (px(10.0), px(90.0), px(10.0), px(40.0));
+            [
+                gaps(pm, (x0 + 4..x1 - 4).map(|x| (x, y0))),
+                gaps(pm, (x0 + 4..x1 - 4).map(|x| (x, y1))),
+                gaps(pm, (y0 + 4..y1 - 4).map(|y| (x0, y))),
+                gaps(pm, (y0 + 4..y1 - 4).map(|y| (x1, y))),
+            ]
+        };
+        assert_eq!(sides(&png(rect(None))), [0; 4], "solid");
+        let dashed = sides(&png(rect(dash)));
+        assert!(dashed.iter().all(|g| *g >= 3), "gaps on every side: {dashed:?}");
+        let oval = |dash| ElementKind::Ellipse { fill: Rgba::new(0, 0, 0, 0), outline: black, width: 2.0, dash };
+        // Round its outline: the ellipse fills (10, 10, 80, 30) mm.
+        let round = |pm: &Pixmap| {
+            let px = |mm: f64| mm * 96.0 / 25.4;
+            // Inked where any pixel within one of the curve's point is: the 2-point stroke is about
+            // 2 pixels wide.
+            let near = |(x, y): (f64, f64)| {
+                (-1..=1).any(|dx| (-1..=1).any(|dy| rgb(pm, (x.round() as i32 + dx) as u32, (y.round() as i32 + dy) as u32).0 < 128))
+            };
+            let ink: Vec<bool> = (0..2000)
+                .map(|i| f64::from(i) / 2000.0 * std::f64::consts::TAU)
+                .map(|t| near((px(50.0 + 40.0 * t.cos()), px(25.0 + 15.0 * t.sin()))))
+                .collect();
+            ink.windows(2).filter(|w| w[0] && !w[1]).count()
+        };
+        assert_eq!(round(&png(oval(None))), 0, "solid");
+        assert!(round(&png(oval(dash))) >= 20, "{}", round(&png(oval(dash))));
+    }
+
+    /// A dashed box round a turned text, on one page (#1763): the picture has the box's gaps and
+    /// the text running down the page inside it; the recorded page (the PDF's) keeps the dashes as
+    /// pieces and the text as glyphs; the SVG writes the dash array and the turn.
+    #[test]
+    fn a_dashed_box_and_a_turned_text_share_a_page() {
+        use crate::vector::Item;
+        // The text's box (10, 45, 80, 10) mm turned 90° about (50, 50): 45..55 across, 10..90 down.
+        let mut layout = turned_text_page(90.0);
+        let dash = rustgis_map::symbology::Dash::new(&[6.0, 6.0]);
+        let outline = Rgba::rgb(0, 0, 0);
+        layout.add(
+            "Box",
+            (5.0, 5.0, 90.0, 90.0),
+            ElementKind::Rectangle { fill: Rgba::new(0, 0, 0, 0), outline, width: 2.0, radius: 0.0, dash },
+        );
+        let info = PageInfo::default();
+        let png = render(&layout, &mut [], 96.0, &info).unwrap();
+        let px = |mm: f64| (mm * 96.0 / 25.4).round() as u32;
+        assert!(gaps(&png, (px(10.0)..px(90.0)).map(|x| (x, px(5.0)))) >= 3, "the box's top is dashed");
+        // Inside the box: the text, tall and narrow about x = 50 mm.
+        let inside: Vec<(u32, u32)> =
+            (px(8.0)..px(92.0)).flat_map(|y| (px(8.0)..px(92.0)).map(move |x| (x, y))).filter(|&(x, y)| rgb(&png, x, y).0 < 128).collect();
+        let (l, r) = (inside.iter().map(|p| p.0).min().unwrap(), inside.iter().map(|p| p.0).max().unwrap());
+        let (t, b) = (inside.iter().map(|p| p.1).min().unwrap(), inside.iter().map(|p| p.1).max().unwrap());
+        assert!(b - t > 4 * (r - l) && l > px(44.0) && r < px(56.0), "the text runs down the page: {l},{t} to {r},{b}");
+        let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
+        let (_, _, items) = drawing.finish();
+        let pieces: usize = items
+            .iter()
+            .filter_map(|i| if let Item::Stroke { path, .. } = i { Some(path) } else { None })
+            .map(|p| p.segments().filter(|s| matches!(s, tiny_skia::PathSegment::MoveTo(_))).count())
+            .sum();
+        let text: String = items
+            .iter()
+            .filter_map(|i| if let Item::Glyphs(r) = i { Some(r) } else { None })
+            .flat_map(|r| r.glyphs.iter().map(|g| g.ch))
+            .collect();
+        assert!(pieces > 20 && text == "Fonte: IBGE, 2022", "{pieces} dashes, text {text:?}");
+        let svg = crate::svg::layout_svg(&layout, &mut [], 96.0, &info).unwrap().0;
+        assert!(svg.contains("stroke-dasharray") && svg.contains(r#"transform="rotate(90 50 50)""#), "{svg}");
+    }
+
+    /// A dashed outline is kept as vectors, its dashes as the pieces of the path (as a dashed line
+    /// layer's are), which draw what its picture shows (#1763).
+    #[test]
+    fn a_dashed_outline_is_kept_as_its_dashes() {
+        use crate::vector::Item;
+        let dash = rustgis_map::symbology::Dash::new(&[6.0, 6.0]);
+        let kind = ElementKind::Rectangle { fill: Rgba::new(0, 0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 2.0, radius: 0.0, dash };
+        let layout = shape_page(kind);
+        let info = PageInfo::default();
+        let png = render(&layout, &mut [], 96.0, &info).unwrap();
+        let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
+        let (_, _, items) = drawing.finish();
+        let pieces: usize = items
+            .iter()
+            .filter_map(|i| if let Item::Stroke { path, .. } = i { Some(path) } else { None })
+            .map(|p| p.segments().filter(|s| matches!(s, tiny_skia::PathSegment::MoveTo(_))).count())
+            .sum();
+        assert!(pieces > 20, "{pieces} dashes kept");
+        let mut replayed = Pixmap::new(png.width(), png.height()).unwrap();
+        replayed.fill(tiny_skia::Color::WHITE);
+        crate::vector::replay(&items, &mut replayed, Transform::identity());
+        let differ = png.pixels().iter().zip(replayed.pixels()).filter(|(a, b)| a.red().abs_diff(b.red()) > 48).count();
+        assert!(differ < 50, "{differ} pixels differ");
+    }
+
+    /// A page with one text element in (10, 45, 80, 10) mm, turned `turn` degrees.
+    fn turned_text_page(turn: f64) -> Layout {
+        let mut l = Layout::new("L", 100.0, 100.0);
+        let mut kind = ElementKind::text("Fonte: IBGE, 2022", 14.0, Rgba::rgb(0, 0, 0), false);
+        if let ElementKind::Text { rotation, .. } = &mut kind {
+            *rotation = turn;
+        }
+        l.add("Source", (10.0, 45.0, 80.0, 10.0), kind);
+        l
+    }
+
+    /// The dark pixels' bounds: left, top, right, bottom.
+    fn ink_bounds(pm: &Pixmap) -> (u32, u32, u32, u32) {
+        let dark: Vec<(u32, u32)> =
+            (0..pm.height()).flat_map(|y| (0..pm.width()).map(move |x| (x, y))).filter(|&(x, y)| rgb(pm, x, y).0 < 128).collect();
+        let xs = dark.iter().map(|p| p.0);
+        let ys = dark.iter().map(|p| p.1);
+        (xs.clone().min().unwrap(), ys.clone().min().unwrap(), xs.max().unwrap(), ys.max().unwrap())
+    }
+
+    /// A text turned 90° runs down the page from the top of its turned box, -90° up it from the
+    /// bottom, about the centre of its box (#1763); upright, it runs across as before.
+    #[test]
+    fn a_turned_text_runs_down_or_up_the_page() {
+        // 100 mm at 96 dpi; the box's centre at 50 mm.
+        let centre = 50.0 * 96.0 / 25.4;
+        let ink = |turn: f64| ink_bounds(&render(&turned_text_page(turn), &mut [], 96.0, &PageInfo::default()).unwrap());
+        let (l, t, r, b) = ink(0.0);
+        assert!(r - l > 4 * (b - t), "upright runs across: {l},{t} to {r},{b}");
+        for turn in [90.0, -90.0] {
+            let (l, t, r, b) = ink(turn);
+            assert!(b - t > 4 * (r - l), "{turn}° runs along the page: {l},{t} to {r},{b}");
+            // Across: within the turned box, 10 mm wide about the centre.
+            assert!((f64::from(l + r) / 2.0 - centre).abs() < 10.0 * 96.0 / 25.4 / 2.0, "{turn}°: {l}..{r}");
+            // Along: a left-aligned line starts at the box's left edge, which a turn of 90° takes to
+            // the top and one of -90° to the bottom.
+            let middle = f64::from(t + b) / 2.0;
+            assert!(if turn > 0.0 { middle < centre } else { middle > centre }, "{turn}°: {t}..{b} about {centre}");
+        }
+    }
+
+    /// A quarter-turned text keeps as sharp as an upright one: its picture is put on whole pixels,
+    /// not filtered between them, so its edges have no more part-covered pixels (#1763). At 300 dpi
+    /// the box's corner falls between pixels (10 mm is 118.1 of them).
+    #[test]
+    fn a_quarter_turned_text_is_as_sharp_as_upright() {
+        // Solid pixels (darker than 80 %) and part-covered ones (20 to 80 %).
+        let edges = |turn: f64| {
+            let pm = render(&turned_text_page(turn), &mut [], 300.0, &PageInfo::default()).unwrap();
+            let dark = (0..pm.height()).flat_map(|y| (0..pm.width()).map(move |x| (x, y))).map(|(x, y)| 255 - u32::from(rgb(&pm, x, y).0));
+            dark.fold((0u32, 0u32), |(solid, part), d| (solid + u32::from(d > 204), part + u32::from(d > 51 && d <= 204)))
+        };
+        let (solid, part) = edges(0.0);
+        let upright = f64::from(part) / f64::from(solid);
+        for turn in [90.0, -90.0, 180.0] {
+            let (s, p) = edges(turn);
+            let turned = f64::from(p) / f64::from(s);
+            assert!(turned < upright * 1.2, "{turn}°: {p} part-covered to {s} solid, upright {part} to {solid}");
+            assert!(s.abs_diff(solid) * 10 < solid, "{turn}°: as much ink, {s} solid to {solid}");
+        }
+    }
+
+    /// A turned text's picture covers the lines it draws, not its whole box: a short line in a
+    /// large box takes a small picture, where its alignment puts the line (#1763).
+    #[test]
+    fn a_turned_texts_picture_covers_its_lines() {
+        let r = Rect::from_xywh(0.0, 0.0, 2000.0, 1000.0).unwrap();
+        let plain = TextStyle { face: text::Face::default(), align: TextAlign::Left, spacing: 0.0 };
+        let px = 14.0 * 1.33;
+        let area = |align| text_area(r, "Fonte: IBGE", 14.0, TextStyle { align, ..plain }, 1.0).unwrap();
+        let left = area(TextAlign::Left);
+        assert!(left.width() < 200.0 && left.height() < 4.0 * px, "{left:?}");
+        assert!(left.left() < 0.0 && left.top() < 0.0, "a line's height of room: {left:?}");
+        let right = area(TextAlign::Right);
+        assert!((right.right() - (2000.0 + px)).abs() < 1.0 && (right.width() - left.width()).abs() < 1.0, "{right:?}");
+        let centre = area(TextAlign::Center);
+        assert!(((centre.left() + centre.right()) / 2.0 - 1000.0).abs() < 1.0, "{centre:?}");
+        // Two lines, twice the pitch; nothing when there is no line.
+        let two = text_area(
+            r,
+            "Fonte: IBGE
+Elaboração: RustGIS",
+            14.0,
+            plain,
+            1.0,
+        )
+        .unwrap();
+        assert!((two.height() - left.height() - px * 1.25).abs() < 0.01);
+        assert!(text_area(r, "", 14.0, plain, 1.0).is_none());
+    }
+
+    /// A turned box past the page's budget is still drawn turned, at a lower resolution, not
+    /// left out or left upright (#1763).
+    #[test]
+    fn a_huge_turned_box_is_drawn_at_a_lower_resolution() {
+        let mut pm = Canvas::new(200, 200).unwrap();
+        // 20,000 px long (past MAX_SIDE), 20 high, about the canvas's centre.
+        let r = Rect::from_xywh(-9_900.0, 90.0, 20_000.0, 20.0).unwrap();
+        let mut scale = 0.0;
+        let area = Rect::from_xywh(0.0, 0.0, r.width(), r.height()).unwrap();
+        draw_turned_box(&mut pm, r, 90.0, area, |c, inner, k| {
+            scale = k;
+            c.fill_rect(inner, &paint(Rgba::rgb(0, 0, 0), 1.0), Transform::identity(), None);
+        });
+        assert!(scale < 1.0 && scale > 0.0, "{scale}");
+        // Turned upright: a bar down the middle, top to bottom; nothing beside it.
+        let dark = |x: u32, y: u32| pm.pixmap().pixel(x, y).is_some_and(|p| p.alpha() > 128);
+        assert!(dark(100, 2) && dark(100, 197) && dark(95, 100), "the bar runs down the page");
+        assert!(!dark(70, 100) && !dark(130, 100));
+    }
+
+    /// A turned text is kept as turned glyphs, which draw what its picture shows (#1763).
+    #[test]
+    fn a_turned_text_is_kept_turned_as_vectors() {
+        use crate::vector::Item;
+        let layout = turned_text_page(90.0);
+        let info = PageInfo::default();
+        let png = render(&layout, &mut [], 96.0, &info).unwrap();
+        let (drawing, _) = render_drawing(&layout, &mut [], 96.0, &info).unwrap();
+        let (_, _, items) = drawing.finish();
+        let text: String = items
+            .iter()
+            .filter_map(|i| if let Item::Glyphs(r) = i { Some(r) } else { None })
+            .flat_map(|r| r.glyphs.iter().map(|g| g.ch))
+            .collect();
+        assert_eq!(text, "Fonte: IBGE, 2022", "kept as text, not a picture");
+        let mut replayed = Pixmap::new(png.width(), png.height()).unwrap();
+        replayed.fill(tiny_skia::Color::WHITE);
+        crate::vector::replay(&items, &mut replayed, Transform::identity());
+        let (pl, pt, pr, pb) = ink_bounds(&png);
+        let (vl, vt, vr, vb) = ink_bounds(&replayed);
+        assert!(
+            pl.abs_diff(vl) <= 2 && pt.abs_diff(vt) <= 2 && pr.abs_diff(vr) <= 2 && pb.abs_diff(vb) <= 2,
+            "{pl},{pt},{pr},{pb} vs {vl},{vt},{vr},{vb}"
+        );
     }
 
     /// Text elements take italic, alignment and letter spacing (#213, point c); plain, they draw
@@ -3621,7 +4083,7 @@ mod tests {
         l.add(
             "Rule",
             (5.0, 10.0, 40.0, 0.15),
-            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0 },
+            ElementKind::Rectangle { fill: Rgba::rgb(0, 0, 0), outline: Rgba::rgb(0, 0, 0), width: 0.0, radius: 0.0, dash: None },
         );
         let pm = render(&l, &mut [], 300.0, &PageInfo::default()).unwrap();
         let x = pm.width() / 2;
@@ -3638,7 +4100,7 @@ mod tests {
         l.add(
             "Arrow",
             (10.0, 7.0, 80.0, 6.0),
-            ElementKind::Line { color: blue, width: 1.0, dir: LineDir::Horizontal, head: LineHead::End },
+            ElementKind::Line { color: blue, width: 1.0, dir: LineDir::Horizontal, head: LineHead::End, dash: None },
         );
         let pm = render(&l, &mut [], 254.0, &PageInfo::default()).unwrap();
         let inked = |x: u32, y: u32| pm.pixel(x, y).is_some_and(|p| p.red() < 128 && p.blue() > 128);
@@ -3657,11 +4119,11 @@ mod tests {
         // 100 × 50 mm at 254 dpi: ten pixels a millimetre.
         let mut l = Layout::new("Layout", 100.0, 50.0);
         let red = Rgba::rgb(255, 0, 0);
-        l.add("Circle", (10.0, 10.0, 30.0, 30.0), ElementKind::Ellipse { fill: red, outline: red, width: 0.0 });
+        l.add("Circle", (10.0, 10.0, 30.0, 30.0), ElementKind::Ellipse { fill: red, outline: red, width: 0.0, dash: None });
         l.add(
             "Line",
             (50.0, 10.0, 40.0, 30.0),
-            ElementKind::Line { color: Rgba::rgb(0, 0, 255), width: 2.0, dir: LineDir::Rising, head: LineHead::None },
+            ElementKind::Line { color: Rgba::rgb(0, 0, 255), width: 2.0, dir: LineDir::Rising, head: LineHead::None, dash: None },
         );
         let pm = render(&l, &mut [], 254.0, &PageInfo::default()).unwrap();
         let is = |x: u32, y: u32, want: (u8, u8, u8)| pm.pixel(x, y).is_some_and(|p| (p.red(), p.green(), p.blue()) == want);
