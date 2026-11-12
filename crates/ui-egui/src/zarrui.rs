@@ -191,7 +191,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                             let added =
                                 app.session.active_layer.and_then(|id| app.session.map().layer(id)).map_or(name, |l| l.name.clone());
                             for loss in lost {
-                                app.session.notify(format!("{added}: {loss}"), false);
+                                app.session.notify(i18n::fmt("{layer}: {notice}", &[("layer", &added), ("notice", &loss)]), false);
                             }
                             app.map.invalidate();
                         }

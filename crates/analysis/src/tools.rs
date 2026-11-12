@@ -4261,7 +4261,7 @@ pub fn raster_crs(ds: &Dataset, p: &Json, tool: &str) -> Result<(Crs, Option<Str
 
 /// The projected coordinate system `text` names, and its compatibility note, or an error for one
 /// in degrees: a raster's cells are measured in a projected system's units.
-pub fn projected_crs(text: &str) -> Result<(Crs, Option<&'static str>), String> {
+pub fn projected_crs(text: &str) -> Result<(Crs, Option<String>), String> {
     let (crs, note) = crs_with_compatibility_note(text)?;
     if crs.is_geocentric() {
         return Err("crs must be a projected coordinate system, not a geocentric one (X, Y and Z from the Earth's centre)".into());
