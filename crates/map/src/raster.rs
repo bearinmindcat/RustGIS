@@ -2509,7 +2509,6 @@ mod tests {
         assert!(Colorizer::new(&k, &r, None).color(&[5.0], None).is_some());
     }
 
-    /// #348: values a mask lists, or outside (or inside) its range, are no data.
     /// A style mask's statistics leave out the cells a colour band's alpha draws see-through, as
     /// the band's own leave them out (#1810).
     #[test]
@@ -2539,6 +2538,7 @@ mod tests {
         assert_eq!(mask.stats(&r, 3).count, 16);
     }
 
+    /// #348: values a mask lists, or outside (or inside) its range, are no data.
     #[test]
     fn masks_hide_values_and_their_statistics() {
         let r = dem();

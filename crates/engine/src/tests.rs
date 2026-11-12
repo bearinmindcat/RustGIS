@@ -43355,13 +43355,34 @@ fn see_through_cells_are_left_out_of_an_rgba_rasters_statistics() {
 
 /// Change Detection leaves out a cell either raster draws see-through (#1810): the first's left
 /// ten columns, holding −3.4e38, and the second's bottom ten rows, holding a stray 7, on the same
-/// grid and on one moved half a cell (its alpha resampled as its band is). Every cell both show
-/// compares, black ones included: 5 apart.
+/// grid and on one moved 0.4 m. Every cell both show compares, black ones included: 5 apart. A
+/// second moved five cells east, see-through in its own right ten columns, has its alpha
+/// resampled as its band is: read at the first's cells instead, it would hide other columns.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn change_detection_leaves_out_see_through_cells() {
     use rustgis_data::raster::Raster;
     let before = see_through_ortho("before", |i| i % 40 < 10, 0.0);
+    // Five cells east: its column k is the first's column k + 5, with the first's colours plus 5
+    // (its first five columns cover the first's see-through ones), see-through from its column 30.
+    let moved = {
+        let see = |i: usize| i % 40 >= 30;
+        let bands = (0..4)
+            .map(|b| {
+                (0..1600)
+                    .map(|i| match (b, see(i)) {
+                        (3, true) => 0.0,
+                        (3, false) => 255.0,
+                        (_, true) => 7.0,
+                        (_, false) => before.bands[b].data[i + 5] + 5.0,
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut gt = before.transform;
+        gt.origin_x += 5.0;
+        Raster::new("after moved", 40, 40, bands, gt, before.crs, None, before.color.clone(), "Float32").unwrap()
+    };
     let mut after = see_through_ortho("after", |i| i >= 1200, 5.0);
     for b in 0..3 {
         for v in after.bands[b].data.iter_mut().skip(1200) {
@@ -43375,7 +43396,7 @@ fn change_detection_leaves_out_see_through_cells() {
         Raster::new("after shifted", 40, 40, bands, gt, after.crs, None, after.color.clone(), "Float32").unwrap()
     };
     let mut s = Session::new(Project::default());
-    for r in [before, after, shifted] {
+    for r in [before, after, shifted, moved] {
         let name = r.name.clone();
         let bytes = rustgis_data::raster::geotiff::write(&r, 0).unwrap();
         crate::cmd::raster::add_raster(&mut s, &name, rustgis_map::RasterLayer::from_bytes(r, "x.tif", bytes)).unwrap();
@@ -43390,6 +43411,18 @@ fn change_detection_leaves_out_see_through_cells() {
         assert_eq!(kept.len(), 30 * 30, "{after}");
         assert!(kept.iter().all(|v| *v == 5.0), "{after}: {:?}", kept.iter().find(|v| **v != 5.0));
     }
+    // Moved: the first's columns 0 to 4 are off the second, 5 to 9 see-through in the first, and
+    // 35 to 39 the second's see-through 30 to 34; 10 to 34 of every row compare, 5 apart. Its alpha
+    // read at the first's cells would hide 30 to 39 instead (800 cells, and 7s compared).
+    s.run("raster.change", &json!({"before": "before", "after": "after moved", "method": "difference", "name": "moved change"})).unwrap();
+    let r = s.map().layer_by_name("moved change").unwrap().raster.as_ref().unwrap().data.clone().unwrap();
+    let kept: Vec<usize> = (0..1600).filter(|i| r.is_valid(r.bands[0].data[*i])).collect();
+    assert_eq!(kept.len(), 25 * 40);
+    assert!(
+        kept.iter().all(|i| (10..35).contains(&(i % 40)) && r.bands[0].data[*i] == 5.0),
+        "{:?}",
+        kept.iter().find(|i| r.bands[0].data[**i] != 5.0)
+    );
 }
 
 /// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read

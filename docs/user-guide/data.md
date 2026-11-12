@@ -1208,7 +1208,8 @@ value, or one under half a 256th of opaque. That is alpha 0 in an 8-bit image, 1
 Raster information's counts and ranges, and the stretches taken from them: Minimum Maximum,
 Percent Clip, Standard Deviation, Histogram Equalize, a style mask's, and a cloud-optimised
 GeoTIFF's own. So a value those cells hold, such as −3.4e38 in a Float32 image, doesn't set the
-stretch, and an opaque black cell still counts. The alpha band itself counts every cell.
+stretch, and an opaque black cell still counts. The alpha band's own statistics count every
+alpha with a value, see-through ones included.
 **Change Detection** gives no-data where either image is see-through.
 
 **Cast shadows**, on a Shaded Relief layer (`raster.symbology` `"shadow"`, 0 to 1), darkens the
