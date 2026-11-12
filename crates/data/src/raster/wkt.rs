@@ -303,7 +303,7 @@ fn lift_proj4_grids(root: &mut Node) {
 /// one optional; `None` when none is left.
 fn grid_names(value: &str) -> Option<String> {
     let grids: Vec<&str> =
-        value.split(',').map(str::trim).filter(|g| !g.is_empty() && !g.trim_start_matches('@').eq_ignore_ascii_case("null")).collect();
+        value.split(',').map(|g| g.trim().trim_start_matches('@')).filter(|g| !g.is_empty() && !g.eq_ignore_ascii_case("null")).collect();
     (!grids.is_empty()).then(|| grids.join(", "))
 }
 
@@ -2930,6 +2930,9 @@ pub(crate) mod tests {
             (plain_crs, Some("the file's grid shift (conus) isn't applied, so positions may be off by as much as that shift"))
         );
         assert_eq!(read_wkt(&with("@null")).unwrap(), read_wkt(utm_wkt1).unwrap());
+        // An optional grid (`@`) is named without PROJ's mark.
+        let (_, note) = read_wkt(&with("@conus,@null")).unwrap();
+        assert_eq!(note.as_deref(), Some("the file's grid shift (conus) isn't applied, so positions may be off by as much as that shift"));
         // A system read otherwise (by `Crs::parse`, typed into a command, or by a GeoPackage
         // row's EPSG code) says it as the definition's; one without a grid, or a code, says
         // nothing.

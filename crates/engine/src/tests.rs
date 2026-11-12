@@ -22588,7 +22588,13 @@ fn nad27_bound_by_conus() -> (String, String, &'static str) {
 /// its map in UTM zone 17N's metres instead of degrees: 1 km apart, around 500 km E 4800 km N.
 #[cfg(not(target_arch = "wasm32"))]
 fn zarr_store_with(tag: &str, attrs: &Value, projected: bool) -> (std::path::PathBuf, String) {
-    let (dir, path) = zarr_store_at(tag, &[0, 31, 59]);
+    zarr_store_with_days(tag, attrs, projected, &[0, 31, 59])
+}
+
+/// [`zarr_store_with`] at `days` (as [`zarr_store_at`] takes them).
+#[cfg(not(target_arch = "wasm32"))]
+fn zarr_store_with_days(tag: &str, attrs: &Value, projected: bool, days: &[i32]) -> (std::path::PathBuf, String) {
+    let (dir, path) = zarr_store_at(tag, days);
     let store = std::path::Path::new(&path);
     let mut meta: Value = serde_json::from_slice(&std::fs::read(store.join(".zmetadata")).unwrap()).unwrap();
     let m = meta["metadata"].as_object_mut().unwrap();
@@ -22692,8 +22698,8 @@ fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
     }
 }
 
-/// A summary of a store whose own system is bound to WGS 84 by a grid (UTM zone 17N on NAD 27 by
-/// `conus`) says once that the grid isn't applied, as its slices do; WGS 84's zone says nothing
+/// A summary or trend of a store whose own system is bound to WGS 84 by a grid (UTM zone 17N on NAD
+/// 27 by `conus`) says on each layer it adds that the grid isn't applied, as its slices do; WGS 84's zone says nothing
 /// (#1678).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -22701,14 +22707,23 @@ fn a_zarr_summary_says_a_grid_its_store_doesnt_apply() {
     let _cache = zarr_cache_lock();
     let (utm, _, said) = nad27_bound_by_conus();
     for (attrs, expected) in [(json!({"crs_wkt": utm}), 1), (json!({"epsg_code": 32617}), 0)] {
-        let (dir, path) = zarr_store_with("reduce-grid", &attrs, true);
-        let mut s = Session::new(Project::default());
-        let mark = s.notice_mark();
-        s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean"})).unwrap();
-        let notices = s.notices_since(mark);
-        let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no transformation")).count();
-        let of = notices.iter().filter(|n| n.text.ends_with(said)).count();
-        assert_eq!((of, shifts), (expected, expected), "{attrs}: {notices:?}");
+        // Four dates, as a trend needs.
+        let (dir, path) = zarr_store_with_days("reduce-grid", &attrs, true, &[0, 31, 59, 90]);
+        // Zarr's own summary, and the data cube's summary and trend, which give four layers: each
+        // says it once.
+        for (cmd, extra, layers) in
+            [("zarr.reduce", json!({"stat": "mean"}), 1), ("cube.reduce", json!({"stat": "mean"}), 1), ("cube.trend", json!({}), 4)]
+        {
+            let mut s = Session::new(Project::default());
+            let mark = s.notice_mark();
+            let mut p = json!({"path": path, "variable": "t"});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            s.run(cmd, &p).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+            let notices = s.notices_since(mark);
+            let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no transformation")).count();
+            let of = notices.iter().filter(|n| n.text.ends_with(said)).count();
+            assert_eq!((of, shifts), (expected * layers, expected * layers), "{cmd} {attrs}: {notices:?}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }
