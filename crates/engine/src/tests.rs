@@ -22699,7 +22699,7 @@ fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
 }
 
 /// A summary or trend of a store whose own system is bound to WGS 84 by a grid (UTM zone 17N on NAD
-/// 27 by `conus`) says on each layer it adds that the grid isn't applied, as its slices do; WGS 84's zone says nothing
+/// 27 by `conus`) says once that the grid isn't applied, as its slices do; WGS 84's zone says nothing
 /// (#1678).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
@@ -22709,10 +22709,9 @@ fn a_zarr_summary_says_a_grid_its_store_doesnt_apply() {
     for (attrs, expected) in [(json!({"crs_wkt": utm}), 1), (json!({"epsg_code": 32617}), 0)] {
         // Four dates, as a trend needs.
         let (dir, path) = zarr_store_with_days("reduce-grid", &attrs, true, &[0, 31, 59, 90]);
-        // Zarr's own summary, and the data cube's summary and trend, which give four layers: each
-        // says it once.
-        for (cmd, extra, layers) in
-            [("zarr.reduce", json!({"stat": "mean"}), 1), ("cube.reduce", json!({"stat": "mean"}), 1), ("cube.trend", json!({}), 4)]
+        // Zarr's own summary, and the data cube's summary and trend: each says it once, though a
+        // trend adds four layers.
+        for (cmd, extra) in [("zarr.reduce", json!({"stat": "mean"})), ("cube.reduce", json!({"stat": "mean"})), ("cube.trend", json!({}))]
         {
             let mut s = Session::new(Project::default());
             let mark = s.notice_mark();
@@ -22722,7 +22721,7 @@ fn a_zarr_summary_says_a_grid_its_store_doesnt_apply() {
             let notices = s.notices_since(mark);
             let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no transformation")).count();
             let of = notices.iter().filter(|n| n.text.ends_with(said)).count();
-            assert_eq!((of, shifts), (expected * layers, expected * layers), "{cmd} {attrs}: {notices:?}");
+            assert_eq!((of, shifts), (expected, expected), "{cmd} {attrs}: {notices:?}");
         }
         let _ = std::fs::remove_dir_all(dir);
     }

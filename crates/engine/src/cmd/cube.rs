@@ -104,17 +104,14 @@ pub trait TimeCube: Send + Sync {
     }
 }
 
-/// `outputs` with what reading the cube's slices said ([`TimeCube::lost`]).
+/// `outputs` with what reading the cube's slices said ([`TimeCube::lost`]) on the first of them:
+/// said once for the run, not once a layer.
 fn with_lost(outputs: Result<Vec<Raster>, String>, cube: &dyn TimeCube) -> Result<Vec<Raster>, String> {
-    let lost = cube.lost();
-    outputs.map(|rs| {
-        rs.into_iter()
-            .map(|mut r| {
-                r.lost.clone_from(&lost);
-                r
-            })
-            .collect()
-    })
+    let mut outputs = outputs?;
+    if let Some(first) = outputs.first_mut() {
+        first.lost = cube.lost();
+    }
+    Ok(outputs)
 }
 
 /// A stack of rasters (or a raster's bands), a date each.
