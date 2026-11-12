@@ -1588,7 +1588,7 @@ fn clip_window(
         .collect::<Result<Vec<_>, _>>()?;
     if add_alpha {
         // Opaque where the cell is kept and has a value in some band, as Project Raster's alpha.
-        let valued = |i: usize| r.bands.iter().any(|b| b.data.get(at(i)).is_some_and(|v| r.is_valid(*v)));
+        let valued = |i: usize| r.bands.iter().any(|b| b.data.get(at(i)).is_some_and(|v| !v.is_nan()));
         bands.push(rasterops::per_index(wu * h as usize, wu, n, || (), |_, i| if kept(i) && valued(i) { 255.0 } else { 0.0 })?);
     }
     let o = r.transform.to_world(f64::from(cols.start), f64::from(rows.start));
