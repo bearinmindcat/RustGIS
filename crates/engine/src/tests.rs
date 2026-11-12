@@ -3201,9 +3201,16 @@ fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
     r.overview = Some((800, 600));
     rl.data = Some(std::sync::Arc::new(r));
     let said = |s: &Session| s.notices.iter().filter(|n| n.text.contains("scene: its cast shadows aren't drawn")).count();
-    let dir = std::env::temp_dir().join(format!("rustgis-cast-every-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = |name: &str| dir.join(name).display().to_string();
+    /// Removed however the test ends.
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-cast-every-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let path = |name: &str| dir.0.join(name).display().to_string();
     let draws: Vec<(&str, Box<dyn Fn(&mut Session)>)> = vec![
         ("map image", Box::new(|s| drop(crate::cmd::share::map_png(s, Some(200.0), Some(150.0), None).unwrap()))),
         ("map PDF", Box::new(|s| drop(crate::cmd::share::map_pdf(s, 72.0).unwrap()))),
@@ -3227,18 +3234,30 @@ fn every_drawing_of_the_map_says_a_layer_drawn_without_its_cast_shadows() {
         draw(&mut s);
         assert!(said(&s) > 0, "{what}: {:?}", s.notices.iter().map(|n| &n.text).collect::<Vec<_>>());
     }
-    std::fs::remove_dir_all(&dir).ok();
     // On the interface's thread a new sun's shadows aren't waited for: the image says so.
     let mut s = with_raster();
     s.run("layer.zoomTo", &json!({"layer": "scene"})).unwrap();
     s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": 123, "shadow": 1})).unwrap();
     crate::render::on_the_interface_thread();
+    // Held before they trace, the shadows are still to come whatever the computer's speed.
+    let hold = crate::map::raster::hold_cast_shadows();
     crate::cmd::share::map_png(&mut s, Some(200.0), Some(150.0), None).unwrap();
     assert!(
         s.notices.iter().any(|n| n.text.contains("still being worked out")),
         "{:?}",
         s.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
     );
+    // A file exported there (a script's, or while a style's view loads) says it was written
+    // without them, a GeoTIFF too.
+    for (azimuth, name) in [(124, "here.png"), (125, "here.tif")] {
+        s.run("raster.symbology", &json!({"type": "shadedRelief", "azimuth": azimuth, "shadow": 1})).unwrap();
+        s.notices.clear();
+        let path = path(name);
+        s.run("share.exportMap", &json!({"path": path, "width": 200, "height": 150})).unwrap();
+        let texts: Vec<&String> = s.notices.iter().map(|n| &n.text).collect();
+        assert!(texts.iter().any(|t| t.starts_with(&path) && t.contains("still being worked out")), "{name}: {texts:?}");
+    }
+    drop(hold);
 }
 
 #[test]
@@ -12426,6 +12445,7 @@ fn registry_downloads_are_checked() {
         package: "https://example.com/x.rgplugin".into(),
         sha256: "0".repeat(64),
         size: 0,
+        packages: Default::default(),
         min_rustgis_version: String::new(),
         permissions: Vec::new(),
         i18n: Default::default(),
@@ -12438,6 +12458,29 @@ fn registry_downloads_are_checked() {
     e.id = "other".into();
     assert!(crate::cmd::plugins::install_checked(&e, &bytes).unwrap_err().contains("not 'other'"));
     e.id = "eng-reg".into();
+    // A plugin with packages for other platforms only has nothing to install here (#1821).
+    let elsewhere = rustgis_plugins::registry::Entry {
+        package: String::new(),
+        sha256: String::new(),
+        packages: [(
+            if cfg!(windows) { "linux" } else { "windows" }.to_string(),
+            rustgis_plugins::registry::PlatformPackage {
+                package: "https://example.com/x.rgplugin".into(),
+                sha256: e.sha256.clone(),
+                size: 0,
+            },
+        )]
+        .into(),
+        ..e.clone()
+    };
+    let err = crate::cmd::plugins::install_checked(&elsewhere, &bytes).unwrap_err();
+    let other = if cfg!(windows) { "Linux" } else { "Windows" };
+    assert!(
+        err.starts_with("Reg has no package for ") && err.ends_with(&format!("(it is available for {other}); it wasn't installed")),
+        "{err}"
+    );
+    assert_eq!(crate::cmd::plugins::entry_status(&elsewhere)["available"], json!(false));
+    assert_eq!(crate::cmd::plugins::entry_status(&e)["available"], json!(true));
     // What the registry said about how it runs (shown before installing) must be so.
     e.runtime = rustgis_plugins::manifest::Runtime::Process;
     let err = crate::cmd::plugins::install_checked(&e, &bytes).unwrap_err();
@@ -14857,6 +14900,30 @@ fn serve_files(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<std::sy
         }
     });
     (base, asked)
+}
+
+/// A registry that lists a platform's package RustGIS can't use (#1821) says so, with which;
+/// one read whole says nothing.
+#[test]
+fn a_skipped_platform_package_is_said() {
+    let sha = "a".repeat(64);
+    let said = |linux: Value| {
+        let registry = json!({"plugins": [{"id": "globe", "name": "Globe", "version": "1.0.0", "packages": {
+            "windows": {"package": "globe-windows.rgplugin", "sha256": sha}, "linux": linux}}]});
+        let (base, _) = serve_files(vec![
+            ("/registry.json".into(), registry.to_string().into_bytes()),
+            ("/blocklist.json".into(), br#"{"blocked": []}"#.to_vec()),
+        ]);
+        let mut s = Session::new(Project::default());
+        let mark = s.notices_given();
+        let listed = s.run("plugin.registry", &json!({"url": format!("{base}/registry.json")})).unwrap();
+        assert_eq!(listed[0]["id"], "globe");
+        s.notices_since(mark).iter().filter(|n| n.text.contains("were skipped")).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let lossy = said(json!({"package": "globe-linux.rgplugin", "sha256": "abc"}));
+    assert_eq!(lossy.len(), 1, "{lossy:?}");
+    assert!(lossy[0].starts_with("1 package(s) for a platform") && lossy[0].ends_with(": globe (Linux)"), "{lossy:?}");
+    assert_eq!(said(json!({"package": "globe-linux.rgplugin", "sha256": sha})), Vec::<String>::new());
 }
 
 /// A registry whose blocklist can't be read warns that the last blocklist read stays in force;
@@ -41645,6 +41712,118 @@ fn a_clipped_colour_raster_stays_8_bit() {
         }
     }
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A STAC search limited to a shape (`intersects`, from GeoJSON or the selected features, widened
+/// by `buffer` metres): the shape is sent in place of the bbox, what merging leaves out is said
+/// once, and clean input says nothing.
+#[test]
+fn stac_search_by_shape_says_what_it_leaves_out() {
+    let item = r#"{"type": "Feature", "id": "S2_1", "collection": "s2", "bbox": [7, 46, 8, 47],
+        "geometry": {"type": "Polygon", "coordinates": [[[7, 46], [8, 46], [8, 47], [7, 47], [7, 46]]]},
+        "properties": {"datetime": "2024-06-02T10:30:00Z", "eo:cloud_cover": 3.5}, "assets": {}}"#;
+    // A POST answered before its body is read is asked again as a GET, so each search may take two.
+    let base = serve_routes(vec![("/v1/search", format!(r#"{{"type": "FeatureCollection", "features": [{item}]}}"#))], 40);
+    let api = format!("{base}/v1");
+    let said = |s: &Session, text: &str| s.notices.iter().filter(|n| n.text.contains(text)).count();
+    let mut s = Session::new(Project::default());
+
+    // One point: nothing is left out, so nothing is said; the shape comes back for reuse.
+    let point = json!({"type": "Point", "coordinates": [7.5, 46.5]});
+    let r = s.run("stac.search", &json!({"url": api, "intersects": point, "footprints": false})).unwrap();
+    assert_eq!(r["count"], 1, "{r}");
+    assert_eq!(r["intersects"], point);
+    assert_eq!(said(&s, "left out"), 0, "{:?}", s.notices);
+
+    // A point and a polygon: the polygon is searched, the point is counted in one notice.
+    let mixed = json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": point},
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[7, 46], [8, 46], [8, 47], [7, 46]]]}}]});
+    let r = s.run("stac.search", &json!({"url": api, "intersects": mixed, "footprints": false, "bbox": [0, 0, 1, 1]})).unwrap();
+    assert_eq!(r["intersects"]["type"], "Polygon");
+    assert_eq!(said(&s, "1 part(s) of a lower dimension are left out"), 1, "{:?}", s.notices);
+    assert_eq!(said(&s, "the search area replaces it"), 1, "a bbox given with a shape is said to be unused");
+
+    // A buffer widens a point into a polygon; on a polygon it is not applied, and says so.
+    let r = s.run("stac.search", &json!({"url": api, "intersects": point, "buffer": 5000, "footprints": false})).unwrap();
+    assert_eq!(r["intersects"]["type"], "Polygon", "{r}");
+    assert_eq!(said(&s, "buffer is not applied"), 0);
+    s.run("stac.search", &json!({"url": api, "intersects": mixed, "buffer": 5000, "footprints": false})).unwrap();
+    assert_eq!(said(&s, "buffer is not applied"), 1);
+    s.run("stac.search", &json!({"url": api, "buffer": 5000, "footprints": false, "bbox": [7, 46, 8, 47]})).unwrap();
+    assert_eq!(said(&s, "buffer is not used"), 1);
+
+    // The selected features of a layer, and a layer with none selected.
+    s.run(
+        "layer.addDataText",
+        &json!({"fileName": "pts.geojson", "text": json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [7.2, 46.2]}},
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [7.8, 46.8]}}]}).to_string()}),
+    )
+    .unwrap();
+    let e = s.run("stac.search", &json!({"url": api, "intersects": "selection"})).unwrap_err();
+    assert!(e.contains("select the features"), "{e}");
+    let id = s.map().layer_by_name("pts").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().selection = vec![1];
+    let r = s.run("stac.search", &json!({"url": api, "intersects": "selection", "layer": "pts", "footprints": false})).unwrap();
+    assert_eq!(r["intersects"], json!({"type": "Point", "coordinates": [7.8, 46.8]}));
+    let before = s.notices.len();
+    let area = s.run("stac.area", &json!({"layer": "pts", "buffer": 100})).unwrap();
+    assert_eq!(area["intersects"]["type"], "Polygon");
+    assert_eq!(
+        s.notices.len(),
+        before,
+        "clean input says nothing: {:?}",
+        s.notices.iter().skip(before).map(|n| &n.text).collect::<Vec<_>>()
+    );
+    // The ring reaches 100 m from the point [7.8, 46.8] on every side, in degrees of each axis.
+    let ring: Vec<(f64, f64)> =
+        area["intersects"]["coordinates"][0].as_array().unwrap().iter().map(|c| (c[0].as_f64().unwrap(), c[1].as_f64().unwrap())).collect();
+    let reach = |f: fn(&(f64, f64)) -> f64, at: f64| ring.iter().map(|c| (f(c) - at).abs()).fold(0.0, f64::max);
+    let (dlat, dlon) = (100.0 / 111_195.0, 100.0 / (111_195.0 * 46.8f64.to_radians().cos()));
+    assert!((reach(|c| c.1, 46.8) / dlat - 1.0).abs() < 0.05, "{ring:?}");
+    assert!((reach(|c| c.0, 7.8) / dlon - 1.0).abs() < 0.05, "{ring:?}");
+
+    // Hostile input is refused, with the reason, not read as no area at all or failing elsewhere.
+    for (bad, why) in [
+        (json!({"intersects": "everywhere"}), "intersects is GeoJSON"),
+        (json!({"intersects": 7}), "intersects is GeoJSON"),
+        (json!({"intersects": {"type": "Point", "coordinates": [500, 0]}}), "longitude"),
+        (json!({"intersects": {"type": "Point", "coordinates": "x"}}), "isn't GeoJSON geometry"),
+        (json!({"intersects": {"type": "FeatureCollection", "features": []}}), "no point, line or polygon"),
+        (json!({"intersects": point, "buffer": -1}), "buffer is a distance of 0 to"),
+        (json!({"intersects": point, "buffer": "far"}), "buffer is a number"),
+        (json!({"intersects": point, "buffer": 1e12}), "buffer is a distance of 0 to"),
+    ] {
+        let mut q = bad.clone();
+        q["url"] = json!(api);
+        let e = s.run("stac.search", &q).unwrap_err();
+        assert!(e.contains(why), "{bad}: {e}");
+    }
+    let e = s.run("stac.area", &json!({"path": "/no/such/file.geojson"})).unwrap_err();
+    assert!(e.contains("/no/such/file.geojson"), "{e}");
+    let e = s.run("stac.area", &json!({"layer": "nowhere"})).unwrap_err();
+    assert!(e.contains("nowhere"), "{e}");
+
+    // A selected feature without geometry is counted, once, and the rest still make the area.
+    s.run(
+        "layer.addDataText",
+        &json!({"fileName": "gaps.geojson", "text": json!({"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [7.5, 46.5]}},
+        {"type": "Feature", "properties": {}, "geometry": null},
+        {"type": "Feature", "properties": {}, "geometry": null}]}).to_string()}),
+    )
+    .unwrap();
+    let id = s.map().layer_by_name("gaps").unwrap().id;
+    s.map_mut().layer_mut(id).unwrap().selection = vec![0, 1, 2];
+    let r = s.run("stac.area", &json!({"layer": "gaps"})).unwrap();
+    assert_eq!(r["intersects"], json!({"type": "Point", "coordinates": [7.5, 46.5]}));
+    assert_eq!(said(&s, "2 selected feature(s) have no geometry"), 1);
+    // Only the features with geometry selected: nothing to say.
+    s.map_mut().layer_mut(id).unwrap().selection = vec![0];
+    let before = said(&s, "have no geometry");
+    s.run("stac.area", &json!({"layer": "gaps"})).unwrap();
+    assert_eq!(said(&s, "have no geometry"), before);
 }
 
 /// A layer read whole from a Shapefile or GeoJSON file remembers the files and its rows as read

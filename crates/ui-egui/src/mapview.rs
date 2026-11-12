@@ -3075,12 +3075,12 @@ fn interact(app: &mut RustGisApp, ui: &mut Ui, resp: &egui::Response, rect: Rect
                         } else if !is_found(&v) {
                             // Only WMS layers being asked: the click found nothing yet, so it clears
                             // the selection as an empty click does.
-                            let _ = app.session.run("select.clear", &Value::Null);
+                            clear_selection_quietly(app);
                         }
                         Some(Popup::new(v, c, app.session.project.active_map, app.session.opened))
                     }
                     _ => {
-                        let _ = app.session.run("select.clear", &Value::Null);
+                        clear_selection_quietly(app);
                         None
                     }
                 };
@@ -3259,6 +3259,14 @@ fn with_template(app: &RustGisApp, mut p: Value) -> Value {
 
 /// Adds a graphic drawn with a tool, then returns to Explore unless the tool is kept.
 pub fn finish_graphic(app: &mut RustGisApp, shape: &str, pts: Vec<Coord>) {
+    // While the STAC search area is being drawn, the shape goes to it, not to a graphics layer.
+    if let Some(taken) = crate::stacui::take_drawn(app, shape, &pts) {
+        app.map.cancel_sketch();
+        if taken && !app.session.keep_tool {
+            app.session.tool = Tool::Explore;
+        }
+        return;
+    }
     let coords: Vec<[f64; 2]> = pts.iter().map(|c| [c.x, c.y]).collect();
     let ok = app.run("graphics.add", json!({"shape": shape, "points": coords})).is_ok();
     app.map.cancel_sketch();
@@ -3288,6 +3296,8 @@ fn overlays(app: &mut RustGisApp, ui: &mut Ui, p: &egui::Painter, rect: Rect, t:
         p.rect_filled(r, 0.0, accent.gamma_multiply(0.12));
         p.rect_stroke(r, 0.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
     }
+    // The STAC search area, while that pane is open.
+    crate::stacui::paint_area(app, p, rect, accent);
     // Vertices of the selected features while editing.
     let editing = &app.session.map().editing;
     if editing.settings.enabled
@@ -4875,6 +4885,14 @@ mod picture_tests {
     }
 }
 
+/// An empty click clears the selection when there is one. With nothing selected it does nothing:
+/// `select.clear` refuses then ("nothing is selected"), and a click is not a request to be told so.
+fn clear_selection_quietly(app: &mut RustGisApp) {
+    if app.session.map().selection_count() > 0 {
+        let _ = app.session.run("select.clear", &Value::Null);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5239,6 +5257,23 @@ mod tests {
         assert_eq!(h.state().session.tool, Tool::Select);
         selection_click(&mut h, [2., 2.]);
         assert_eq!(selection_rows(&h), vec![1]);
+    }
+
+    /// An Explore click on empty map clears a selection, and with nothing selected gives no
+    /// "nothing is selected" error notice.
+    #[test]
+    fn explore_click_on_empty_map_clears_without_a_notice() {
+        let mut h = selection_harness();
+        h.state_mut().run("tool.set", json!({"tool": "explore"})).unwrap();
+        let mark = h.state().session.notice_mark();
+        selection_click(&mut h, [3.5, 1.5]);
+        assert!(selection_rows(&h).is_empty());
+        h.state_mut().run("select.rows", json!({"layer": "Points", "rows": [1]})).unwrap();
+        // A second empty click, elsewhere, with a row selected: it clears the selection.
+        selection_click(&mut h, [1.0, 3.5]);
+        assert!(selection_rows(&h).is_empty(), "an empty click clears the selection");
+        let errors: Vec<_> = h.state().session.notices_since(mark).iter().filter(|n| n.error).map(|n| n.text.clone()).collect();
+        assert!(errors.is_empty(), "no error notice: {errors:?}");
     }
 
     #[test]
