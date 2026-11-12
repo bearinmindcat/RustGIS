@@ -111,11 +111,13 @@ or other WKT:
   none of these, when the target gives a zero transformation where its datum has another (a
   writer's placeholder, as for ED50 or NAD 27), or when combining the two transformations'
   rotations could be off by a centimetre.
-- A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS`), or
-  another without Helmert translations, isn't applied: the system is read without it, with a
-  notice naming it and its grid file, as positions may be off by as much as that shift. A
-  `BOUNDCRS` without a transformation, which PROJ refuses, is read as its source system, with a
-  notice.
+- A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS` or
+  `+nadgrids` in its `PROJ4` extension), or another without Helmert translations, isn't applied:
+  the system is read without it, with a notice naming it and its grid file, as positions may be
+  off by as much as that shift. A system read by an EPSG code that has its own shift to WGS 84
+  uses that shift instead, and the notice says so. A `BOUNDCRS` without a transformation, which
+  PROJ refuses, is read as its source system, with a notice unless the source is on WGS 84. A
+  ballpark offset is no known shift (the datum's own notice says so), and a null offset is none.
 - The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
   FileGDB's system, a LAS file or a Zarr store. WKT given as a command's `crs`, and a GeoPackage
   system read by its EPSG code, say of these only the two above: a transformation that isn't

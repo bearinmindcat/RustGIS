@@ -855,7 +855,7 @@ fn an_ascii_grid_with_a_mars_prj_says_a_grid_it_doesnt_apply() {
     let grid = "ncols 2\nnrows 2\nxllcorner 10\nyllcorner 10\ncellsize 1\n1 2\n3 4\n";
     let gridded = MARS_ESRI.replace("0.0]],PRIMEM", r#"0.0],EXTENSION["PROJ4_GRIDS","mars.gsb"]],PRIMEM"#);
     assert_ne!(gridded, MARS_ESRI);
-    let said = "the .prj file: the file's grid shift to WGS 84 (mars.gsb) isn't applied, so positions may be off by as much as that shift";
+    let said = "the .prj file: the file's grid shift (mars.gsb) isn't applied, so positions may be off by as much as that shift";
     for (name, prj, notice) in [("gridded", gridded.as_str(), true), ("plain", MARS_ESRI, false)] {
         std::fs::write(dir.path().join(format!("{name}.asc")), grid).unwrap();
         std::fs::write(dir.path().join(format!("{name}.prj")), prj).unwrap();

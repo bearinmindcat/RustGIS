@@ -659,7 +659,7 @@ fn ext(path: &Path) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn given_epsg(given: &str) -> Result<(u16, Option<String>)> {
     match Crs::parse(given) {
-        Ok(c) if c.epsg() > 0 => Ok((c.epsg(), crate::raster::wkt::unapplied_note(given).map(|note| format!("crs: {note}")))),
+        Ok(c) if c.epsg() > 0 => Ok((c.epsg(), crate::raster::wkt::unapplied_note(given, c).map(|note| format!("crs: {note}")))),
         _ => Err(DataError::Format(format!("'{given}': give the coordinate system as EPSG:<code>"))),
     }
 }
@@ -856,7 +856,7 @@ pub(crate) fn gpkg_reproject(srs_id: i64, row: Option<GpkgSrs>, notes: &mut Vec<
             ));
         }
         // A grid the definition gives isn't applied by the code either (#1678).
-        if let Some(note) = named.and_then(crate::raster::wkt::unapplied_note) {
+        if let Some(note) = named.and_then(|d| crate::raster::wkt::unapplied_note(d, crs)) {
             notes.push(format!("its coordinate system (srs_id {srs_id}): {note}"));
         }
         return Ok(Reproject::from_crs(crs, notes));

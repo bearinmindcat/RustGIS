@@ -22620,7 +22620,8 @@ fn zarr_store_with(tag: &str, attrs: &Value, projected: bool) -> (std::path::Pat
 fn a_zarr_series_says_a_grid_its_store_doesnt_apply() {
     let _cache = zarr_cache_lock();
     let (utm, geog, said) = nad27_bound_by_conus();
-    let said = format!("crs: {said}");
+    // Of the variable: no `crs` was given.
+    let said = format!("t: {said}");
     let wgs84 = rustgis_data::raster::wkt::to_wkt(rustgis_data::raster::Crs::LonLat).unwrap();
     // On UTM zone 17N's central meridian, in the middle cell.
     let at = rustgis_data::raster::Crs::from_epsg(32617)
@@ -22687,6 +22688,27 @@ fn a_zarr_slice_says_a_typed_grid_only_when_it_uses_it() {
             let typed_said = notices.iter().filter(|n| n.text.contains("the definition's")).count();
             assert_eq!(typed_said, usize::from(attrs == json!({}) && projected), "{attrs} following={following}: {notices:?}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// A summary of a store whose own system is bound to WGS 84 by a grid (UTM zone 17N on NAD 27 by
+/// `conus`) says once that the grid isn't applied, as its slices do; WGS 84's zone says nothing
+/// (#1678).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_zarr_summary_says_a_grid_its_store_doesnt_apply() {
+    let _cache = zarr_cache_lock();
+    let (utm, _, said) = nad27_bound_by_conus();
+    for (attrs, expected) in [(json!({"crs_wkt": utm}), 1), (json!({"epsg_code": 32617}), 0)] {
+        let (dir, path) = zarr_store_with("reduce-grid", &attrs, true);
+        let mut s = Session::new(Project::default());
+        let mark = s.notice_mark();
+        s.run("zarr.reduce", &json!({"path": path, "variable": "t", "stat": "mean"})).unwrap();
+        let notices = s.notices_since(mark);
+        let shifts = notices.iter().filter(|n| n.text.contains("isn't applied") || n.text.contains("has no transformation")).count();
+        let of = notices.iter().filter(|n| n.text.ends_with(said)).count();
+        assert_eq!((of, shifts), (expected, expected), "{attrs}: {notices:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

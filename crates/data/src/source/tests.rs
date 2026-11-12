@@ -63,7 +63,8 @@ fn ed50_utm31_bound() -> String {
 #[test]
 fn a_geopackage_row_read_by_its_code_says_its_definitions_grid() {
     let bound = ed50_utm31_bound();
-    let said = "its coordinate system (srs_id 100001): the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied, so positions may be off by as much as that shift";
+    // Read by its code, whose own Helmert shift stands in for the grid.
+    let said = "its coordinate system (srs_id 100001): the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied; EPSG:23031's own shift to WGS 84 is used in its place, so positions may be off by the difference between the two";
     // Near Barcelona, where EPSG:23031 (and its own Helmert shift) places it.
     let xy = Coord::new(430_000.0, 4_580_000.0);
     let by_code = Crs::from_epsg(23031).unwrap().transformer().unwrap().to_lonlat(xy).unwrap();
@@ -88,7 +89,7 @@ fn a_geopackage_row_read_by_its_code_says_its_definitions_grid() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_database_crs_read_by_its_code_says_its_definitions_grid() {
-    let said = "crs: the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied, so positions may be off by as much as that shift";
+    let said = "crs: the definition's NTv2 transformation to WGS 84 (SPED2ETV2.gsb) isn't applied; EPSG:23031's own shift to WGS 84 is used in its place, so positions may be off by the difference between the two";
     assert_eq!(given_epsg(&ed50_utm31_bound()).unwrap(), (23031, Some(said.to_string())));
     assert_eq!(given_epsg(ED50_UTM31).unwrap(), (23031, None));
     assert_eq!(given_epsg("EPSG:23031").unwrap(), (23031, None));

@@ -1331,14 +1331,14 @@ fn series(s: &mut Session, p: &Value) -> CmdResult {
         // its WKT says; a shift the WKT gives that isn't applied is still said, as its slices say it.
         let (x, y) = if zarr::is_lonlat_grid(&store, &var) {
             if let Some((_, Some(note))) = zarr::grid_crs(&store, &var) {
-                s.warn(format!("crs: {note}"));
+                s.warn(format!("{var}: {note}"));
             }
             (lon, lat)
         } else {
             let crs = match zarr::grid_crs(&store, &var) {
                 Some((c, note)) => {
                     if let Some(note) = note {
-                        s.warn(format!("crs: {note}"));
+                        s.warn(format!("{var}: {note}"));
                     }
                     c
                 }
@@ -1409,6 +1409,9 @@ impl ReduceRun {
         let mut totals = super::cube::Totals::new(self.stat, 0)?;
         // Steps never written (no chunk at all), read as having no value.
         let mut unwritten = 0usize;
+        // What reading the slices said (a shift the store's system doesn't apply, …), once each:
+        // the summary is in their grid, so it is said of it too.
+        let mut lost: Vec<String> = Vec::new();
         for &i in &self.steps {
             if cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
@@ -1428,6 +1431,11 @@ impl ReduceRun {
                     }
                 },
             };
+            for l in &r.lost {
+                if !lost.contains(l) {
+                    lost.push(l.clone());
+                }
+            }
             let vals = &r.bands.first().ok_or("the slice has no band")?.data;
             match &first {
                 None => {
@@ -1472,6 +1480,7 @@ impl ReduceRun {
             raster::Raster::new(&self.name, first.0, first.1, vec![out], first.2, first.3, None, raster::ColorHint::Gray, "Float32")
                 .map_err(|e| e.to_string())?;
         r.source = Some(self.root.clone());
+        r.lost = lost;
         Ok(r)
     }
 }
