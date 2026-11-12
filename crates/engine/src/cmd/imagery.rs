@@ -1551,7 +1551,7 @@ fn mosaic_matches(first: &Raster, r: &Raster) -> Result<(), String> {
 /// The cells of `r` in a column and row window, as a new raster on the same grid. With a mask
 /// (row-major over the window), the cells it leaves out have no value, as Project Raster leaves
 /// the cells outside its source (`rustgis_analysis::warp`): in a raster with alpha they are
-/// see-through, 0 in every band, and a colour raster with neither alpha nor no-data gains an alpha
+/// see-through, 0 in every band, and a three-band colour raster with neither alpha nor no-data gains an alpha
 /// band for them, so an 8-bit image stays 8-bit (#1731). Otherwise they are its no-data, or
 /// -3.4e38 when it has none.
 fn clip_window(
