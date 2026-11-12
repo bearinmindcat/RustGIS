@@ -20,6 +20,7 @@ pub mod layout;
 mod line_labels;
 mod line_markers;
 pub mod logo;
+mod mapgrid;
 mod mesh;
 mod native_tiles;
 mod pattern_fill;
@@ -537,6 +538,9 @@ pub struct Rendered {
     pub pending_in_place: Vec<u32>,
     /// The frame kept as vectors, when it was recorded ([`render_complete_recorded`]).
     pub(crate) recorded: Option<Canvas>,
+    /// When recorded, each of `labels`' map layer, by id and name (`u32::MAX` and no name for
+    /// a label of no layer's), for [`draw_labels`]; else empty.
+    pub(crate) label_layers: Vec<(u32, String)>,
 }
 
 /// Which rasteriser [`render_backend`] targets: the tiny-skia CPU pixmap (the default, and the
@@ -2578,6 +2582,7 @@ fn render_tilted(map: &mut Map, view: &View, full_res_rasters: bool, sources_rea
         partial,
         pending_in_place,
         recorded: None,
+        label_layers: Vec::new(),
     })
 }
 
@@ -3841,6 +3846,8 @@ fn render_frame(
     }
     if map.graticule && grat.a() > 0 {
         let p = paint(grat, 1.0);
+        // A measured or UTM graticule's lines (#1042), else latitudes and longitudes.
+        let grid = mapgrid::lines(map, view);
         let step = if view.camera.res > 8000.0 {
             30.0
         } else if view.camera.res > 2000.0 {
@@ -3851,17 +3858,20 @@ fn render_frame(
             1.0
         };
         let (lat_max, lat_min) = if globe.is_some() { (90.0, -90.0) } else { (85.0, -85.0) };
-        let mut lines = Vec::new();
-        let mut lon = -180.0;
-        while lon <= 180.0 {
-            lines.push((0..=36).map(|i| Coord::new(lon, lat_min + (lat_max - lat_min) * i as f64 / 36.0)).collect::<Vec<_>>());
-            lon += step;
-        }
-        let mut lat = -90.0 + step;
-        while lat < 90.0 {
-            lines.push((0..=72).map(|i| Coord::new(-180.0 + i as f64 * 5.0, lat)).collect::<Vec<_>>());
-            lat += step;
-        }
+        let lines = grid.unwrap_or_else(|| {
+            let mut lines = Vec::new();
+            let mut lon = -180.0;
+            while lon <= 180.0 {
+                lines.push((0..=36).map(|i| Coord::new(lon, lat_min + (lat_max - lat_min) * i as f64 / 36.0)).collect::<Vec<_>>());
+                lon += step;
+            }
+            let mut lat = -90.0 + step;
+            while lat < 90.0 {
+                lines.push((0..=72).map(|i| Coord::new(-180.0 + i as f64 * 5.0, lat)).collect::<Vec<_>>());
+                lat += step;
+            }
+            lines
+        });
         let lines = if globe.is_some() {
             lines
         } else if custom {
@@ -3992,6 +4002,8 @@ fn render_frame(
     // The layer drawn last, whose tile layers go over it before the next.
     let mut below: Option<u32> = None;
     for li in order {
+        // Each layer drawn is a layer of the recording (#1815); what comes between them isn't.
+        pm.layer(None);
         // A frame no longer wanted stops between layers (see `cancel`).
         if cancel::requested() {
             break;
@@ -4004,6 +4016,7 @@ fn render_frame(
         if !layer.visible || !layer.in_scale_range(scale) || held.contains(&layer.id) {
             continue;
         }
+        pm.layer_with_id(&layer_name(layer), u64::from(layer.id));
         let opacity = layer.opacity() * group_opacity.get(&layer.id).copied().unwrap_or(1.0);
         let mask = masks.iter().find(|(id, _)| *id == layer.id).map(|(_, m)| m);
         let (blend, layer_blend) = (blend_mode(layer.blend), layer.blend);
@@ -5098,6 +5111,7 @@ fn render_frame(
             cpu_dirty = true;
         }
     }
+    pm.layer(None);
     // A frame stopped part-way (see `cancel`) is no frame: its tiles, labels and effects aren't
     // worth working out.
     if cancel::requested() {
@@ -5165,6 +5179,16 @@ fn render_frame(
         None => (view.width, view.height),
     };
     let placed = place_labels_with_previews(label_candidates, fixed_labels, lw as f32, lh as f32, lock.is_some(), display.show_unplaced);
+    // Each placed label's map layer, for a recording to keep each layer's labels together: the
+    // fixed labels (graphics text) come first, then one for each key.
+    let label_layers: Vec<(u32, String)> = if pm.is_recording() {
+        let fixed = placed.labels.len().saturating_sub(placed.keys.len());
+        let names: std::collections::HashMap<u32, String> = map.layers.iter().map(|l| (l.id, layer_name(l))).collect();
+        let name = |id: u32| names.get(&id).cloned().unwrap_or_default();
+        std::iter::repeat_n((u32::MAX, String::new()), fixed).chain(placed.keys.iter().map(|((id, ..), _)| (*id, name(*id)))).collect()
+    } else {
+        Vec::new()
+    };
     // (The lock is never taken from a tilted view: its labels' places out of sight are dropped,
     // so the numbers of the places they take aren't those of their class's.)
     if display.locked && map.label_lock.is_none() && !matches!(labels_to, Labels::Tilted(..)) {
@@ -5213,6 +5237,7 @@ fn render_frame(
                 partial,
                 pending_in_place,
                 recorded,
+                label_layers,
             }))
         }
         Backend::Gpu | Backend::GpuLive => {
@@ -6468,15 +6493,23 @@ fn complete(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
     if !NO_SHADOW_WAIT.with(std::cell::Cell::get) {
         wait_for_cast_shadows(map, view);
     }
-    // Whether cast shadows were still to come is the last pass's to say (an earlier one's may
-    // have been drawn again with them); what frames before it said is kept (see `shadows_said`).
-    let before = SHADOWS_TO_COME.with(|c| c.replace(false));
+    // What it says of cast shadows (still to come, layers drawn without them) is the last pass's
+    // to say: an earlier one's may have been drawn again with them. What frames before it said
+    // is kept (see `shadows_said`).
+    let before = (SHADOWS_TO_COME.with(|c| c.replace(false)), take_shadow_notices());
     let r = complete_passes(map, view, record);
-    SHADOWS_TO_COME.with(|c| c.set(before || c.get()));
+    SHADOWS_TO_COME.with(|c| c.set(before.0 || c.get()));
+    let mut notices = before.1;
+    for e in take_shadow_notices() {
+        if !notices.contains(&e) {
+            notices.push(e);
+        }
+    }
+    SHADOW_NOTICES.with(|n| *n.borrow_mut() = notices);
     r
 }
 
-/// [`complete`]'s passes, each saying afresh whether cast shadows were still to come.
+/// [`complete`]'s passes, each saying afresh what it drew of cast shadows.
 fn complete_passes(map: &mut Map, view: &View, record: bool) -> Option<Rendered> {
     // What had come when it drew: what lands meanwhile is news to the wait.
     let mut drawn_at = rustgis_tiles::cache::generation();
@@ -6500,6 +6533,7 @@ fn complete_passes(map: &mut Map, view: &View, record: bool) -> Option<Rendered>
         }
         drawn_at = now;
         SHADOWS_TO_COME.with(|c| c.set(false));
+        take_shadow_notices();
         r = render_cpu(map, view, true, record)?;
     }
     Some(r)
@@ -6525,12 +6559,46 @@ fn render_drawing_inner(map: &mut Map, view: &View) -> Option<vector::Drawing> {
             c
         }
     };
-    for l in r.unplaced.iter().chain(&r.labels) {
-        text::draw(&mut pm, l, view.pixels_per_point as f32);
-    }
+    draw_labels(&mut pm, (&r.unplaced, &r.labels, &r.label_layers), view.pixels_per_point as f32);
     text::scale_bar(&mut pm, view, map.ground_res_at(&view.camera));
     draw_attribution(&mut pm, &r.attribution, view.pixels_per_point as f32, (0.0, 0.0));
     pm.into_drawing()
+}
+
+/// A map layer's name as a recording's layer is named (#1815): a layer with none is named after
+/// its id, as a layout element with none is after its kind.
+fn layer_name(layer: &rustgis_map::Layer) -> String {
+    if layer.name.trim().is_empty() { format!("Layer {}", layer.id) } else { layer.name.clone() }
+}
+
+/// Draws a frame's unplaced and placed labels. A recording keeps each map layer's placed labels
+/// as a layer of their own, "Labels: <layer>" (#1815): drawn in the placement's order, as the
+/// pixels draw them (labels can overlap: pinned ones, a class that shows all), each run of one
+/// layer's labels is marked as that layer, so one layer can be several runs.
+pub(crate) fn draw_labels(pm: &mut Canvas, (unplaced, labels, layers): (&[PlacedLabel], &[PlacedLabel], &[(u32, String)]), ppp: f32) {
+    for l in unplaced {
+        text::draw(pm, l, ppp);
+    }
+    // Recorded, there is a layer for each label (see `render_frame`); without, no layers.
+    if !pm.is_recording() || layers.len() != labels.len() {
+        for l in labels {
+            text::draw(pm, l, ppp);
+        }
+        return;
+    }
+    let mut shown = None;
+    for (l, (id, name)) in labels.iter().zip(layers) {
+        if shown != Some(*id) {
+            if *id == u32::MAX {
+                pm.layer(None);
+            } else {
+                pm.layer_with_id(&format!("Labels: {name}"), u64::from(*id));
+            }
+            shown = Some(*id);
+        }
+        text::draw(pm, l, ppp);
+    }
+    pm.layer(None);
 }
 
 /// Renders a map with its labels, a scale bar and a north arrow to PNG bytes.
@@ -6705,6 +6773,50 @@ mod tests {
             glyphs: Vec::new(),
             background: None,
         }
+    }
+
+    /// Labels of two map layers that overlap (a class that shows all, a pinned label) are
+    /// recorded in the placement's order, as the pixels draw them, so the one on top stays on
+    /// top: each run of one layer's labels is marked as that layer, and its runs are one PDF
+    /// layer (#1815).
+    #[test]
+    fn overlapping_labels_of_two_layers_keep_their_order() {
+        use crate::vector::Item;
+        let labels = [label("Aa", 10.0, None, 0.0), label("Bb", 12.0, None, 0.0), label("Cc", 14.0, None, 0.0)];
+        let layers = [(1, "Rios".to_string()), (2, "Cidades".to_string()), (1, "Rios".to_string())];
+        let record = || {
+            let mut pm = Canvas::recording(120, 40).unwrap();
+            draw_labels(&mut pm, (&[], &labels, &layers), 1.0);
+            pm.into_drawing().unwrap()
+        };
+        let (_, _, items) = record().finish();
+        fn text(items: &[Item]) -> String {
+            items
+                .iter()
+                .map(|i| match i {
+                    Item::Glyphs(r) => r.glyphs.iter().map(|g| g.ch).collect(),
+                    Item::Group(g) => text(&g.items),
+                    _ => String::new(),
+                })
+                .collect()
+        }
+        let runs: Vec<(String, String)> =
+            items.iter().filter_map(|i| if let Item::Group(g) = i { Some((g.layer.clone()?, text(&g.items))) } else { None }).collect();
+        let want = [("Labels: Rios", "Aa"), ("Labels: Cidades", "Bb"), ("Labels: Rios", "Cc")];
+        assert_eq!(runs, want.map(|(a, b)| (a.to_string(), b.to_string())));
+        // One PDF layer for Rios's two runs, marked around each in turn.
+        let pdf = crate::pdf::write(&[crate::pdf::Page::drawing(record(), 40.0, 15.0)], "Labels");
+        let objs = crate::pdf::tests::objects(&pdf);
+        let id = |name: &str| {
+            let ids: Vec<usize> =
+                objs.iter().enumerate().filter(|o| o.1.0 == format!("<< /Type /OCG /Name ({name}) >>")).map(|o| o.0 + 1).collect();
+            assert_eq!(ids.len(), 1, "{name}");
+            ids[0]
+        };
+        let (rios, cidades) = (id("Labels: Rios"), id("Labels: Cidades"));
+        let content = objs.iter().map(|o| String::from_utf8_lossy(&o.1).into_owned()).find(|c| c.contains(" BDC")).unwrap();
+        let marks: Vec<&str> = content.lines().filter(|l| l.ends_with(" BDC")).collect();
+        assert_eq!(marks, [format!("/OC /OC{rios} BDC"), format!("/OC /OC{cidades} BDC"), format!("/OC /OC{rios} BDC")]);
     }
 
     /// While a label is dragged, its callout's line is worked out where it is: from its feature,
@@ -8681,9 +8793,25 @@ mod tests {
             rustgis_map::RasterRenderer::ShadedRelief { band: 0, ramp: None, azimuth: 210.0, altitude: 5.0, z_factor: 1.0, shadow: 1.0 };
         // Drawn only zoomed out past a scale between the centre's and the far band's.
         l.max_scale = Some((centre + farthest) / 2.0);
-        render_complete(&mut m, &view).unwrap();
+        // Its work held before it traces: an export that waits for it can't end until it is let
+        // go, and says it waits (a copy of the layer shares its grids); one that doesn't ends.
+        let probe = m.layer(id).and_then(|l| l.raster.clone()).unwrap();
+        let hold = rustgis_map::raster::hold_cast_shadows();
+        let export = std::thread::spawn(move || {
+            render_complete(&mut m, &view).unwrap();
+            m
+        });
+        let start = std::time::Instant::now();
+        while probe.cast_shadow_waiters() == 0 && !export.is_finished() {
+            assert!(start.elapsed() < std::time::Duration::from_secs(30), "the export neither waited for the grid nor ended");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let waited = probe.cast_shadow_waiters() > 0;
+        drop(hold);
+        let m = export.join().unwrap();
+        assert!(waited, "the export waited for the far band's cast shadows");
         let rl = m.layer(id).and_then(|l| l.raster.as_ref()).unwrap();
-        assert!(matches!(rl.cast_shadows(false, (0, 0), || {}), rustgis_map::raster::CastShadows::Ready(_)), "waited for");
+        assert!(matches!(rl.cast_shadows(false, (0, 0), || {}), rustgis_map::raster::CastShadows::Ready(_)), "and drew them");
     }
 
     /// An export doesn't wait for, nor start, the cast shadows of a layer it doesn't draw: one

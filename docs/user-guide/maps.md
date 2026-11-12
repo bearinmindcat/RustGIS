@@ -594,7 +594,26 @@ with twilight), **Weather** (haze, fog, rain, snow), **Visual Effect** (vignette
 Effect** (tilt-shift blur, film grain) and **Postprocessing** (brightness, contrast, saturation,
 sepia). The **Color Vision** simulator shows the map as people with protanopia, deuteranopia,
 tritanopia or achromatopsia see it (on screen only; exports are untouched). **View › Display ›
-Graticule** (`map.graticule`) draws latitude and longitude lines over the basemap.
+Graticule** (`map.graticule`) draws a graticule over the basemap; its arrow picks the type, and
+picking one shows it:
+
+- **Latitude and Longitude** (the default): parallels and meridians, more of them as you zoom in.
+- **Measured Grid**: eastings and northings in a projected coordinate system, at a round interval
+  that suits the scale (about eight lines across the view), as a layout's measured grid draws them.
+  The system is the one typed under **Measured grid's coordinate system** (an EPSG code such as
+  `2056`, WKT or a PROJ string; `"crs"` in the command); left empty, it is the map's own when the
+  map is projected, else the WGS 84 UTM zone at the centre of the view. A system that can't be read
+  or is geographic is refused, with a message naming it.
+- **UTM Zones**: the WGS 84 UTM zones and their latitude bands (C to X, 80° S to 84° N), with
+  southern Norway's and Svalbard's wider zones. Once no more than eight zone-and-band areas are in
+  view, each also gets its own eastings and northings, at the same interval in all of them and
+  cut at the zone's edges.
+
+The grids have no labels on the map; the status bar reads coordinates in UTM or MGRS. Like the
+latitudes and longitudes, they aren't drawn on the copies of the world a flat map shows past
+±180°. The type and system are saved with the map; a project whose measured grid names a system
+this version can't use (one in degrees, or a PROJ string the web app can't read) opens without it,
+and says so.
 
 **Global** shows a globe; **Local** a flat view centred where you are (azimuthal equidistant;
 not in the web app, which doesn't include that projection).
@@ -617,4 +636,9 @@ GPU Rendering is off by default and remembered across sessions (`ui.map.gpu` is 
 simulation stay on the CPU, and exports are unaffected. A rotated or tilted map uses the GPU
 only when every visible layer can be drawn there: tiles, rasters, terrain, transparency,
 masking, swipe, blending, aggregation, graphics, stacked strokes, fills or labels with icons keep it
-on the CPU. Extrusions use the GPU only on a tilted map.
+on the CPU. Extrusions use the GPU only on a tilted map. In the desktop app, if the graphics
+card runs out of memory (a card with 2 GB at a large window size, with other programs using it
+too), the map switches to the CPU, with a notice, instead of the app closing; clicking **CPU**
+in the status bar tries the GPU again, as does the next start (the setting stays on). Any other
+error the graphics card reports is said once, as the map (or, with the map on the CPU, the
+window) may then be drawn wrongly.

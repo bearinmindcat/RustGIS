@@ -102,20 +102,22 @@ and S-JTSK, the same built-in Helmert datum transformation as the EPSG definitio
 or other WKT:
 
 - A transformation in the file (a `TOWGS84`, or a WKT2 `BOUNDCRS`'s) takes precedence, also over
-  the built-in one of an EPSG code in the WKT, as in PROJ and GDAL. A system RustGIS can read
-  only by that code keeps the code's transformation, with a notice. Web Mercator is on WGS 84, so
-  a transformation its file gives is set aside, with a notice.
+  the built-in one of an EPSG code in the WKT, as in PROJ and GDAL. It also takes precedence over
+  the EPSG code given beside the WKT in a GeoPackage system or a File Geodatabase. A system
+  RustGIS can read only by that code keeps the code's transformation, with a notice. Web Mercator
+  is on WGS 84, so a transformation its file gives is set aside, with a notice.
 - A `BOUNDCRS` whose transformation goes to another datum than WGS 84 continues with that
   datum's own transformation to WGS 84: the one the file gives it, else none for a datum treated
   as WGS 84 (such as RDN2008, IGM95 or NAD 83), else the built-in one. It is refused when there is
   none of these, when the target gives a zero transformation where its datum has another (a
   writer's placeholder, as for ED50 or NAD 27), or when combining the two transformations'
-  rotations could be off by a centimetre.
+  rotations could be off by a centimetre. When it is refused beside the EPSG code of a GeoPackage
+  system or a File Geodatabase, the code is used instead, with a notice.
 - A grid transformation (NTv2 or NADCON, a `BOUNDCRS`'s, or GDAL's WKT1 `PROJ4_GRIDS` or
   `+nadgrids` in its `PROJ4` extension), or another without Helmert translations, isn't applied:
   the system is read without it, with a notice naming it and its grid file, as positions may be
-  off by as much as that shift. A system read by an EPSG code that has its own shift to WGS 84
-  uses that shift instead, and the notice says so. A `BOUNDCRS` without a transformation, which
+  off by as much as that shift. A system read by an EPSG or Esri code that has its own shift to
+  WGS 84 uses that shift instead, and the notice says so. A `BOUNDCRS` without a transformation, which
   PROJ refuses, is read as its source system, with a notice unless the source is on WGS 84. A
   ballpark offset is no known shift (the datum's own notice says so), and a null offset is none.
 - The notices come with WKT read from a Shapefile's or ASCII grid's `.prj`, a GeoPackage's or
@@ -1158,8 +1160,9 @@ and the MCP server see it too. A GeoTIFF read in place that is added before its 
 (the desktop app, the browser) answers `"reading": true`, sized by its header when that is in, and
 with `null` for its size and bands until then.
 `share.exportRaster` writes an untiled GeoTIFF; with `"cog": true` it writes a cloud-optimised one:
-512-pixel tiles compressed with Deflate, overviews (each half the size of the last, down to one
-tile), and every directory ahead of the tiles, so a reader fetches the header once and then only the
+512-pixel tiles compressed with Deflate after a predictor (the floating-point one for decimal
+values, differences along the row for whole numbers, none for classes), overviews (each half the
+size of the last, down to one tile), and every directory ahead of the tiles, so a reader fetches the header once and then only the
 tiles it needs. Overviews are averaged, except for a palette raster or one with a few whole-number
 classes, whose overviews take a pixel so that no class is invented; a palette keeps its colour
 table, though not the table's transparency, which a TIFF colour table can't hold (GDAL drops it
