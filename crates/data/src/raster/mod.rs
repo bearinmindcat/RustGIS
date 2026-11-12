@@ -894,7 +894,7 @@ impl Raster {
         // poles at its outline's edge, which samples miss when the grid's edges are a little past
         // it (its corners are off the outline): whatever of them is in the grid is in its extent
         // (#1701).
-        if !e.is_empty() && self.transformer.is_world_projection() {
+        if let Some(centre) = self.transformer.world_central_meridian().filter(|_| !e.is_empty()) {
             let inside = |lon: f64, lat: f64| {
                 self.transformer.from_lonlat(Coord::new(lon, lat)).is_some_and(|m| {
                     let (col, row) = self.transform.to_pixel(m);
@@ -913,6 +913,12 @@ impl Raster {
             }
             if (0..=steps).any(|i| inside(along(i), -90.0)) {
                 e.min_y = -90.0;
+            }
+            // Centred elsewhere than on 0°, the outline's edges are another meridian than the
+            // antimeridian: the one opposite its centre, on either side of it.
+            let edge = (centre + 360.0).rem_euclid(360.0) - 180.0;
+            if edge.abs() < 180.0 - 1e-6 && (0..=steps).any(|i| [-1e-9, 1e-9].iter().any(|d| inside(edge + d, along(i) / 2.0))) {
+                (e.min_x, e.max_x) = (e.min_x.min(edge), e.max_x.max(edge));
             }
         }
         e
@@ -1842,6 +1848,28 @@ pub(crate) mod tests {
             let (sw, ne) = (at(-10.0, 35.0), at(30.0, 70.0));
             let e = raster((sw.x, sw.y, ne.x, ne.y)).extent();
             assert!(e.min_x > -40.0 && e.max_x < 60.0 && e.min_y > 30.0 && e.max_y < 75.0, "{def}: {e:?}");
+            // Centred on 150°E, the outline's edges are 30°W: the west half is 30°W to 150°E, a
+            // whole world all of it, and the east half, across the antimeridian, all of it too.
+            let crs = Crs::parse(&def.replace("+lon_0=0", "+lon_0=150")).unwrap();
+            let raster = |(west, south, east, north): (f64, f64, f64, f64)| {
+                let (w, h) = (64, 32);
+                let gt = GeoTransform {
+                    origin_x: west,
+                    origin_y: north,
+                    pixel_width: (east - west) / w as f64,
+                    pixel_height: (south - north) / h as f64,
+                };
+                Raster::new("w", w, h, vec![vec![1.0; (w * h) as usize]], gt, crs, None, ColorHint::Gray, "Float32").unwrap()
+            };
+            for past in [1.0, 1.001, 1.01] {
+                let e = raster((-east * past, -north * past, 0.0, north * past)).extent();
+                assert!((e.min_x + 30.0).abs() < 1e-6 && (e.max_x - 150.0).abs() < 1e-6, "{def} at 150°E, west half, {past}: {e:?}");
+                assert_eq!((e.min_y, e.max_y), (-90.0, 90.0), "{def} at 150°E, west half, {past}: {e:?}");
+                for west in [-east * past, 0.0] {
+                    let e = raster((west, -north * past, east * past, north * past)).extent();
+                    assert_eq!((e.min_x, e.max_x), (-180.0, 180.0), "{def} at 150°E from {west}, {past}: {e:?}");
+                }
+            }
         }
     }
 

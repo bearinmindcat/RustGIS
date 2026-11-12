@@ -44,8 +44,10 @@ impl Kind {
 }
 
 /// Winkel's own standard parallel for his Tripel, acos(2/π) (about 50.46°, degrees): the one the
-/// map's Winkel Tripel preset gives as its `+lat_1`. A definition or WKT without one is at 0, as
-/// PROJ 9.8.1 takes it; GDAL and PROJ always write the parallel in WKT, so a file says which.
+/// map's Winkel Tripel preset gives as its `+lat_1`, and the one the `proj` program takes for a
+/// bare `+proj=wintri`. A definition used as a coordinate system, or WKT, without one is at 0, as
+/// PROJ takes those (`cs2cs`, GDAL); GDAL and PROJ always write the parallel in WKT, so a file
+/// says which.
 pub fn winkel_parallel() -> f64 {
     std::f64::consts::FRAC_2_PI.acos().to_degrees()
 }
@@ -164,8 +166,8 @@ pub struct World {
     /// False easting and northing, metres.
     pub x0: f64,
     pub y0: f64,
-    /// Winkel Tripel's standard parallel, degrees (a definition's `+lat_1`, 0 without one, as in
-    /// PROJ); the other projections have none.
+    /// Winkel Tripel's standard parallel, degrees (a definition's `+lat_1`, 0 without one, as
+    /// PROJ takes a coordinate system's); the other projections have none.
     pub lat1: f64,
 }
 

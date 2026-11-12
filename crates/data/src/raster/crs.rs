@@ -623,9 +623,13 @@ struct WorldProjection {
 impl WorldProjection {
     /// The projection a PROJ definition describes when it is `+proj=natearth`, `wintri` or
     /// `eck4`: `None` for any other; an error for one it can't compute (axes other than east and
-    /// north, `+over`, a scale other than 1, a standard parallel that isn't a latitude short of a
-    /// pole). Winkel Tripel's parallel is `+lat_1`, else 0, as PROJ 9.8.1 takes it (the map's
-    /// preset gives Winkel's own, [`rustgis_geom::world::winkel_parallel`]).
+    /// north, `+over`, a scale other than 1, an offset that isn't a number, a Winkel Tripel
+    /// standard parallel that isn't a latitude short of a pole). Winkel Tripel's parallel is
+    /// `+lat_1`, else 0, as PROJ takes a definition used as a coordinate system (`cs2cs`, GDAL,
+    /// and WKT without the parameter; verified with PROJ 9.8.1 and 9.9.0). The `proj` program,
+    /// which runs the bare projection, takes Winkel's own, acos(2/π), for one without `+lat_1`;
+    /// the map's preset gives that one ([`rustgis_geom::world::winkel_parallel`]). Natural Earth
+    /// and Eckert IV have no standard parallel: a `+lat_1` is ignored, as in PROJ.
     fn from_proj4(def: &str) -> Option<Result<WorldProjection, String>> {
         use rustgis_geom::world::Kind as W;
         let tokens: Vec<(&str, &str)> =
@@ -641,7 +645,7 @@ impl WorldProjection {
             if tokens.iter().any(|(k, v)| (*k == "k" || *k == "k_0") && v.parse::<f64>().ok() != Some(1.0)) {
                 return Err("a world projection with a scale other than 1 isn't supported".to_string());
             }
-            let lat1 = match tokens.iter().find(|(k, _)| *k == "lat_1") {
+            let lat1 = match tokens.iter().find(|(k, _)| *k == "lat_1").filter(|_| kind == W::WinkelTripel) {
                 Some((_, v)) => v
                     .parse::<f64>()
                     .ok()
@@ -651,9 +655,11 @@ impl WorldProjection {
             };
             // proj4rs reads what every projection shares (centre, offsets, unit, axes, datum) from
             // the same definition with a projection it has, the equidistant cylindrical, in place.
+            // `+geoc` (latitudes counted from the earth's centre) changes nothing on the sphere
+            // these are computed on, in PROJ too, so it is kept from the datum's longitude/latitude.
             let stand_in: Vec<String> = def
                 .split_whitespace()
-                .filter(|t| !t.trim_start_matches('+').starts_with("lat_1="))
+                .filter(|t| !t.trim_start_matches('+').starts_with("lat_1=") && t.trim_start_matches('+') != "geoc")
                 .map(|t| if t.trim_start_matches('+') == format!("proj={name}") { "+proj=eqc".to_string() } else { t.to_string() })
                 .collect();
             let stand_in = stand_in.join(" ");
@@ -675,6 +681,10 @@ impl WorldProjection {
                 y0: native.false_northing(),
                 lat1,
             };
+            // `+x_0=inf` parses: every point of such a system would be nowhere.
+            if !(world.lon0.is_finite() && world.x0.is_finite() && world.y0.is_finite()) {
+                return Err("its centre or offset isn't a number".to_string());
+            }
             Ok(WorldProjection { world, geo, to_meter })
         })())
     }
@@ -777,10 +787,13 @@ impl Transformer {
         matches!(self.kind, Kind::LonLat | Kind::Proj { geographic: true, .. })
     }
 
-    /// Whether its projection is a world projection RustGIS computes (Natural Earth, Winkel
-    /// Tripel, Eckert IV), whose outline is widest at the equator (#1701).
-    pub(super) fn is_world_projection(&self) -> bool {
-        matches!(self.kind, Kind::World { .. })
+    /// The WGS 84 longitude of its central meridian, when its projection is a world projection
+    /// RustGIS computes (Natural Earth, Winkel Tripel, Eckert IV): its outline's east and west
+    /// edges are the meridian opposite (#1701).
+    pub(super) fn world_central_meridian(&self) -> Option<f64> {
+        let Kind::World { world, wgs84 } = &self.kind else { return None };
+        let centre = Coord::new(world.world.x0 / world.to_meter, world.world.y0 / world.to_meter);
+        world.unproject(wgs84, centre).map(|c| c.x).filter(|lon| lon.is_finite())
     }
 
     /// Web Mercator to native coordinates (the renderer's direction).

@@ -1353,7 +1353,8 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         "ROBINSON" => format!("+proj=robin {at}"),
         // Computed by RustGIS too (`rustgis_geom::world`), on a sphere of the semi-major axis as in
         // PROJ (#1701). Winkel Tripel's standard parallel is the file's (GDAL and PROJ always
-        // write one), else 0, as PROJ reads WKT without one. A parameter that isn't a finite
+        // write one), else 0, as PROJ reads WKT without one (and a bare `+proj=wintri` used as a
+        // coordinate system; the `proj` program takes acos(2/π)). A parameter that isn't a finite
         // number (`1e400`, which `parameters` leaves out) is refused rather than taken as not
         // given, as for Web Mercator: a parallel given so would be read as 0.
         "NATURAL_EARTH" | "ECKERT_IV" | "WINKEL_TRIPEL"
@@ -1361,6 +1362,15 @@ fn custom(p: &Node, method: &str) -> Result<Crs, String> {
         {
             return Err(format!(
                 "the {} projection with a parameter that isn't a finite number isn't supported",
+                p.child("PROJECTION").map_or("", Node::title)
+            ));
+        }
+        // None of the three has a scale factor, and PROJ ignores one. A definition with a scale
+        // other than 1 is refused (`WorldProjection::from_proj4`), so WKT with one is too, rather
+        // than read without it.
+        "NATURAL_EARTH" | "ECKERT_IV" | "WINKEL_TRIPEL" if k0 != 1.0 => {
+            return Err(format!(
+                "the {} projection with a scale factor other than 1 isn't supported",
                 p.child("PROJECTION").map_or("", Node::title)
             ));
         }
@@ -1947,8 +1957,9 @@ fn def_wkt(def: &str, name: &str, code: Option<u16>) -> Option<String> {
             ps = vec![("central_meridian", lon0)];
             "Eckert_IV"
         }
-        // Its standard parallel is the definition's, else 0, as PROJ 9.8.1 takes and writes it
-        // (the map's preset gives Winkel's own, acos(2/π), about 50.46°).
+        // Its standard parallel is the definition's, else 0, as PROJ takes a definition used as a
+        // coordinate system and writes it (the map's preset gives Winkel's own, acos(2/π), about
+        // 50.46°, which is also what the `proj` program takes for the bare projection).
         "wintri" => {
             let lat1 = get("lat_1").unwrap_or(0.0);
             ps = vec![("standard_parallel_1", lat1), ("central_meridian", lon0)];
@@ -2238,6 +2249,30 @@ pub(crate) mod tests {
         assert_eq!(crs_from_wkt(&wkt1.replace(r#"AXIS["Easting",EAST]"#, r#"AXIS["Easting",WEST]"#)), Err(REVERSED_AXES.into()));
         let wintri = r#"PROJCS["unknown",GEOGCS["unknown",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]]],PROJECTION["Winkel_Tripel"],PARAMETER["central_meridian",-60],PARAMETER["standard_parallel_1",40],PARAMETER["false_easting",100],PARAMETER["false_northing",-200],UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],AXIS["Northing",NORTH]]"#;
         assert!(crs_from_wkt(&wintri.replace(r#""standard_parallel_1",40"#, r#""standard_parallel_1",90"#)).is_err());
+        // None has a scale factor: one other than 1 is refused in WKT, as `+k` is in a definition.
+        let scaled =
+            wkt1.replace(r#"PARAMETER["central_meridian",-60],"#, r#"PARAMETER["central_meridian",-60],PARAMETER["scale_factor",0.5],"#);
+        assert!(crs_from_wkt(&scaled).unwrap_err().contains("scale factor other than 1"));
+        assert!(crs_from_wkt(&scaled.replace("0.5]", "1]")).is_ok());
+        assert!(Crs::parse("+proj=natearth +k=0.5 +datum=WGS84 +units=m +no_defs").is_err());
+        // Natural Earth and Eckert IV have no standard parallel: a `+lat_1` is ignored, as in PROJ,
+        // where Winkel Tripel refuses one at a pole. `+geoc` changes nothing on their sphere (PROJ
+        // 9.9.0's `proj` gives the same position with and without it).
+        for name in ["natearth", "eck4"] {
+            let plain = Crs::parse(&format!("+proj={name} +lon_0=-60 +datum=WGS84 +units=m +no_defs")).unwrap().transformer().unwrap();
+            for extra in ["+lat_1=95", "+geoc"] {
+                let def = format!("+proj={name} +lon_0=-60 {extra} +datum=WGS84 +units=m +no_defs");
+                let t = Crs::parse(&def).unwrap_or_else(|e| panic!("{def}: {e}")).transformer().unwrap();
+                let (a, b) = (t.from_lonlat(Coord::new(10.0, 45.0)).unwrap(), plain.from_lonlat(Coord::new(10.0, 45.0)).unwrap());
+                assert!((a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6, "{def}: {a:?} {b:?}");
+            }
+        }
+        assert!(Crs::parse("+proj=wintri +lat_1=95 +datum=WGS84 +units=m +no_defs").is_err());
+        // An offset that isn't a number would place every point nowhere.
+        for bad in ["+x_0=inf", "+y_0=NaN", "+x_0=-inf"] {
+            let def = format!("+proj=natearth {bad} +datum=WGS84 +units=m +no_defs");
+            assert!(Crs::parse(&def).is_err(), "{def}");
+        }
     }
 
     /// A world projection's parameter that isn't a finite number (`1e400`, which the reader
