@@ -752,11 +752,9 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
             break;
         }
         read += 1;
-        let name: String = match super::ps(b, "name").map(str::trim).filter(|n| !n.is_empty()) {
-            Some(n) => {
-                cut_names += usize::from(n.chars().nth(MAX_BOOKMARK_NAME).is_some());
-                n.chars().take(MAX_BOOKMARK_NAME).collect()
-            }
+        // A cut name is counted once the bookmark is kept, below.
+        let (name, name_cut): (String, bool) = match super::ps(b, "name").map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) => (n.chars().take(MAX_BOOKMARK_NAME).collect(), n.chars().nth(MAX_BOOKMARK_NAME).is_some()),
             None => {
                 no_name += 1;
                 continue;
@@ -774,6 +772,7 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
             no_place += 1;
             continue;
         };
+        cut_names += usize::from(name_cut);
         // A file from before bearings faces north.
         camera.set_bearing(f(b, "bearing").unwrap_or(0.0));
         camera.set_pitch(f(b, "pitch").unwrap_or(0.0));
@@ -798,20 +797,25 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
             names.push(name);
         }
     }
-    if names.is_empty() {
-        return Err("the file has no bookmarks this map can show".into());
-    }
     let past = list.len() - read;
-    for (n, what) in [
+    let left: Vec<String> = [
         (no_name, "without a name left out".to_string()),
         (no_place, "without a place this map can show left out".to_string()),
         (past, format!("past the map's {MAX_BOOKMARKS} left out")),
         (cut_names, format!("with a name cut to {MAX_BOOKMARK_NAME} characters")),
         (cut_descriptions, format!("with a description cut to {MAX_DESCRIPTION} characters")),
-    ] {
-        if n > 0 {
-            s.notify(format!("Import Bookmarks: {n} bookmark(s) {what}"), false);
-        }
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, what)| format!("{n} bookmark(s) {what}"))
+    .collect();
+    // Nothing taken is an error, which gives what was left out and why.
+    if names.is_empty() {
+        let none = "the file has no bookmarks this map can show";
+        return Err(if left.is_empty() { none.to_string() } else { format!("{none}: {}", left.join(", ")) });
+    }
+    for what in left {
+        s.notify(format!("Import Bookmarks: {what}"), false);
     }
     Ok(json!({"added": names}))
 }

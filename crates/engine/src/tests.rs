@@ -44387,6 +44387,46 @@ fn lists_past_their_limit_are_refused_or_said() {
     assert_eq!(r["fields"].as_array().map(Vec::len), Some(64));
     let n = s.map().layer_by_name("wide").unwrap().dataset.fields.len();
     assert_eq!(said(&s, mark, "fields are filled in"), [format!("Wide: the first 64 of the layer's {n} fields are filled in")]);
+    // A layer of exactly 64 fields: all filled in, by autofill or by default, and nothing said.
+    let k = 64 - (n - 65);
+    let header: Vec<String> = (0..k).map(|i| format!("g{i}")).collect();
+    let csv = format!("lon,lat,{}\n10,45,{}\n", header.join(","), vec!["1"; k].join(","));
+    s.run("layer.addDataBytes", &json!({"fileName": "narrow.csv", "data": base64::engine::general_purpose::STANDARD.encode(csv)})).unwrap();
+    assert_eq!(s.map().layer_by_name("narrow").unwrap().dataset.fields.len(), 64);
+    s.run("report.new", &json!({"layer": "narrow", "name": "Narrow", "fields": ["g0"]})).unwrap();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("report.autofill", &json!({"report": "Narrow"})).unwrap()["fields"].as_array().map(Vec::len), Some(64));
+    s.run("report.new", &json!({"layer": "narrow", "name": "Narrow default"})).unwrap();
+    assert_eq!(s.project.reports.last().map(|r| r.fields.len()), Some(64));
+    assert!(said(&s, mark, "64").is_empty(), "{:?}", said(&s, mark, "64"));
+    // The rest of a report's lists: given ones refused past their limits, a layer's said.
+    let reports = s.project.reports.len();
+    let wide: Vec<String> = (0..65).map(|i| format!("f{i}")).collect();
+    let e = s.run("report.new", &json!({"layer": "wide", "fields": wide})).unwrap_err();
+    assert!(e.contains("fields has 65 entries") && e.contains("at most 64"), "{e}");
+    let e = s.run("report.new", &json!({"layer": "wide", "groups": ["f0", "f1", "f2", "f3", "f4"]})).unwrap_err();
+    assert!(e.contains("groups has 5 entries") && e.contains("at most 4"), "{e}");
+    assert_eq!(s.project.reports.len(), reports, "nothing added");
+    let e = s.run("report.field", &json!({"report": "Wide", "field": "f64"})).unwrap_err();
+    assert!(e.contains("at most 64 fields"), "{e}");
+    assert_eq!(s.project.reports.iter().find(|r| r.name == "Wide").map(|r| r.fields.len()), Some(64));
+    let mark = s.notice_mark();
+    let r = s.run("report.new", &json!({"layer": "wide", "name": "Default"})).unwrap();
+    assert_eq!(s.project.reports.last().map(|r| r.fields.len()), Some(64), "{r}");
+    assert_eq!(said(&s, mark, "the first 64"), [format!("Default: the report lists the first 64 of the layer's {n} fields")]);
+    s.run("data.relate", &json!({"name": "Country of city", "origin": "Countries", "originKey": "name", "destination": "Cities", "destinationKey": "adm0name"}))
+        .unwrap();
+    s.run("report.new", &json!({"layer": "Countries", "name": "Nations", "fields": ["name"]})).unwrap();
+    let e = s.run("report.subreport", &json!({"relationship": "Country of city", "fields": vec!["name"; 65]})).unwrap_err();
+    assert!(e.contains("fields has 65 entries") && e.contains("at most 64"), "{e}");
+    // A report moved to the wide layer, none of its columns there: the default columns, said.
+    let mark = s.notice_mark();
+    s.run("report.update", &json!({"report": "Nations", "layer": "wide"})).unwrap();
+    assert_eq!(s.project.reports.iter().find(|r| r.name == "Nations").map(|r| r.fields.len()), Some(64));
+    assert_eq!(
+        said(&s, mark, "the first 64"),
+        [format!("Nations: the report's columns are the first 64 of the layer's {n} fields while changing the report layer")]
+    );
     // A bookmarks file: what isn't taken is said, one notice a kind with its count.
     let place = |name: String| json!({"name": name, "lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0});
     let mut long_description = place("Described".into());
@@ -44397,6 +44437,8 @@ fn lists_past_their_limit_are_refused_or_said() {
         json!({"name": "Nowhere", "lon": 10.0, "lat": 95.0, "metresPerPixel": 10.0}),
         json!({"name": "Unplaced"}),
         place("é".repeat(121)),
+        // A long name left out for its place: not counted as cut.
+        json!({"name": "ê".repeat(121), "lon": 200.0, "lat": 45.0, "metresPerPixel": 10.0}),
         long_description,
     ]});
     let mark = s.notice_mark();
@@ -44410,11 +44452,36 @@ fn lists_past_their_limit_are_refused_or_said() {
             "Import Bookmarks: 1 bookmark(s) with a description cut to 2000 characters",
             "Import Bookmarks: 1 bookmark(s) with a name cut to 120 characters",
             "Import Bookmarks: 1 bookmark(s) without a name left out",
-            "Import Bookmarks: 2 bookmark(s) without a place this map can show left out",
+            "Import Bookmarks: 3 bookmark(s) without a place this map can show left out",
         ]
     );
     // A clean file says nothing.
     let mark = s.notice_mark();
     s.run("bookmark.import", &json!({"text": json!({"bookmarks": [place("Again".into())]}).to_string()})).unwrap();
     assert!(said(&s, mark, "Import Bookmarks").is_empty());
+    // A file of nothing this map can show: refused, with what was left out and why.
+    let e = s
+        .run(
+            "bookmark.import",
+            &json!({"text": json!({"bookmarks": [{"name": "Unplaced"}, {"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0}]}).to_string()}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        e,
+        "the file has no bookmarks this map can show: 1 bookmark(s) without a name left out, 1 bookmark(s) without a place this map can show left out"
+    );
+    // The map's 10,000 bookmarks, on a new map: 10,001 keeps the first 10,000 in order and says
+    // the one left; 10,000 are all taken, and nothing is said.
+    let many = |n: usize| json!({"bookmarks": (0..n).map(|i| place(format!("B{i}"))).collect::<Vec<_>>()}).to_string();
+    for (n, kept, note) in
+        [(10_001, 10_000, vec!["Import Bookmarks: 1 bookmark(s) past the map's 10000 left out"]), (10_000, 10_000, vec![])]
+    {
+        s.run("map.new", &json!({"name": format!("Bookmarks {n}")})).unwrap();
+        let mark = s.notice_mark();
+        let r = s.run("bookmark.import", &json!({"text": many(n)})).unwrap();
+        assert_eq!(r["added"].as_array().map(Vec::len), Some(kept));
+        let names: Vec<&str> = s.map().bookmarks.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!((names.len(), names[0], names[kept - 1]), (kept, "B0", format!("B{}", kept - 1).as_str()));
+        assert_eq!(said(&s, mark, "Import Bookmarks"), note);
+    }
 }
