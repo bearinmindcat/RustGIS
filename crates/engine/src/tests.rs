@@ -43384,8 +43384,8 @@ fn change_detection_leaves_out_see_through_cells() {
         Raster::new("after moved", 40, 40, bands, gt, before.crs, None, before.color.clone(), "Float32").unwrap()
     };
     let mut after = see_through_ortho("after", |i| i >= 1200, 5.0);
-    for b in 0..3 {
-        for v in after.bands[b].data.iter_mut().skip(1200) {
+    for band in after.bands.iter_mut().take(3) {
+        for v in band.data.iter_mut().skip(1200) {
             *v = 7.0;
         }
     }
