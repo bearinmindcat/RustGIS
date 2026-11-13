@@ -284,7 +284,10 @@ pub fn commands() -> Vec<C> {
             let mut i = 1;
             while s.project.tasks.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
                 i += 1;
-                name = format!("{base} {i}");
+                // The suffix that tells it apart fits within the name's 200 characters: the name
+                // given gives way to it, and the answer gives the name kept.
+                let suffix = format!(" {i}");
+                name = base.chars().take(200 - suffix.chars().count()).chain(suffix.chars()).collect();
             }
             s.project.tasks.push(Task { name: name.clone(), description, steps });
             Ok(json!({"task": name}))

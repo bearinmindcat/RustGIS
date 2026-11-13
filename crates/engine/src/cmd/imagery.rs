@@ -139,7 +139,7 @@ pub(crate) fn raster(s: &Session, p: &Value) -> Result<Arc<Raster>, String> {
 /// The output's name the parameters give, else `d`; one over 200 characters is refused (#1888).
 pub(crate) fn name(p: &Value, d: String) -> Result<String, String> {
     match ps(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
-        Some(n) => super::within("name", "a layer's name", n, 200),
+        Some(n) => super::within("name", "the output's name", n, 200),
         None => Ok(d),
     }
 }
@@ -1404,6 +1404,8 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     if inputs.len() > MAX_MOSAIC_INPUTS {
         return Err(format!("a mosaic takes at most {MAX_MOSAIC_INPUTS} inputs"));
     }
+    // The name given, checked before any input is read; empty when none is (the first input's then).
+    let given = name(p, String::new())?;
     let max = rustgis_data::raster::max_samples() as i64;
     let mut rs: Vec<Arc<Raster>> = Vec::with_capacity(inputs.len());
     // Each input's place on the first one's grid, and the bounds of them all so far.
@@ -1488,7 +1490,7 @@ fn raster_mosaic(s: &mut Session, p: &Value) -> CmdResult {
     let o = first.transform.to_world(c0 as f64, r0 as f64);
     let gt = GeoTransform { origin_x: o.x, origin_y: o.y, ..first.transform };
     let mut out = Raster::new(
-        name(p, format!("{}_mosaic", first.name))?,
+        if given.is_empty() { format!("{}_mosaic", first.name) } else { given },
         w,
         h,
         bands,

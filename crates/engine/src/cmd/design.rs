@@ -1890,7 +1890,6 @@ fn related(s: &mut Session, p: &Json) -> CmdResult {
 fn template(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or("name is required")?.to_string();
-    let description = super::within("description", "a template's description", ps(p, "description").unwrap_or(""), 500)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     if b(p, "remove").unwrap_or(false) {
         let before = l.design.templates.len();
@@ -1914,6 +1913,8 @@ fn template(s: &mut Session, p: &Json) -> CmdResult {
             defaults.push((l.dataset.fields.get(fi).map(|f| f.name.clone()).unwrap_or_default(), coerced));
         }
     }
+    // Checked on the way to adding it, before the templates change: a removal doesn't read it.
+    let description = super::within("description", "a template's description", ps(p, "description").unwrap_or(""), 500)?;
     l.design.templates.retain(|t| !t.name.eq_ignore_ascii_case(&name));
     l.design.templates.push(FeatureTemplate { name: name.clone(), description, defaults });
     Ok(json!({"template": name, "templates": l.design.templates.len()}))

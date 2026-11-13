@@ -44327,6 +44327,9 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     let pt = json!([[0, 0]]);
     refused(s.run("graphics.add", &json!({"shape": "text", "points": pt, "text": at(2001)})), "graphic text", 2001, 2000);
     s.run("graphics.add", &json!({"shape": "text", "points": pt, "text": at(2000)})).unwrap();
+    // Taken whole: the layer's name and the graphic's text are what was given.
+    let g = s.map().layer(graphics.as_u64().unwrap() as u32).unwrap();
+    assert_eq!((g.name.clone(), rustgis_map::graphics::label(&g.dataset, 0).map(str::to_string)), (at(200), Some(at(2000))));
     // Restyled by layer and row, as `graphics.style` restyles the selected ones (the same code).
     refused(s.run("graphics.edit", &json!({"layer": graphics, "row": 0, "text": at(2001)})), "graphic edited", 2001, 2000);
     // A task's name, description and steps, and a step's title and instructions.
@@ -44335,7 +44338,15 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     let step = json!({"title": "Zoom", "command": "map.goToXY", "params": {"lon": 0, "lat": 0, "scale": 1e6}});
     too_many(s.run("task.new", &json!({"name": "Long", "steps": vec![step.clone(); 201]})), "task steps", 201, 200);
     assert!(s.project.tasks.is_empty(), "no task added");
-    s.run("task.new", &json!({"name": "Lesson", "description": at(2000), "steps": vec![step; 200]})).unwrap();
+    s.run("task.new", &json!({"name": "Lesson", "description": at(2000), "steps": vec![step.clone(); 200]})).unwrap();
+    // A name at the limit, given three times: each told apart by a suffix within the 200.
+    for _ in 0..3 {
+        s.run("task.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap();
+    }
+    let long: Vec<&str> = s.project.tasks.iter().map(|t| t.name.as_str()).filter(|n| n.starts_with('é')).collect();
+    assert_eq!(long.len(), 3, "{long:?}");
+    assert!(long.iter().all(|n| n.chars().count() <= 200), "{:?}", long.iter().map(|n| n.chars().count()).collect::<Vec<_>>());
+    assert!(long[1].ends_with(" 2") && long[2].ends_with(" 3"), "{long:?}");
     assert_eq!((s.project.tasks[0].description.chars().count(), s.project.tasks[0].steps.len()), (2000, 200));
     refused(s.run("task.editStep", &json!({"task": "Lesson", "step": 0, "title": at(201)})), "step title", 201, 200);
     refused(s.run("task.editStep", &json!({"task": "Lesson", "step": 0, "instructions": at(4001)})), "step instructions", 4001, 4000);
@@ -44351,6 +44362,9 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     s.run("layer.displayFilters", &json!({"layer": "Cities", "filters": [filter(at(100))]})).unwrap();
     // A feature template's description.
     refused(s.run("edit.template", &json!({"layer": "Cities", "name": "T", "description": at(501)})), "template description", 501, 500);
+    // Removing one doesn't read its description, so a long one there isn't refused.
+    s.run("edit.template", &json!({"layer": "Cities", "name": "T", "description": at(500)})).unwrap();
+    s.run("edit.template", &json!({"layer": "Cities", "name": "T", "remove": true, "description": at(501)})).unwrap();
     // A saved template's name, and the project opened from one.
     let dir = std::env::temp_dir().join(format!("rustgis-over-limit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -44374,5 +44388,33 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     let many: Vec<Value> = (0..1001).map(|i| json!({"code": i, "name": "s"})).collect();
     too_many(h.run("data.subtypes", &json!({"layer": "Herds", "field": "n", "subtypes": many})), "subtypes", 1001, 1000);
     h.run("data.subtypes", &sub(at(200))).unwrap();
+    // A task from a geoprocessing history of 250 runs, not steps given: it keeps the first 200, in
+    // their order, and says so, the one cut this keeps; from 200 runs nothing is said.
+    let run = |i: usize| crate::GpRecord {
+        tool: "Buffer".into(),
+        id: "buffer".into(),
+        params: json!({"input": "Cities", "distance": i}),
+        command: None,
+        at: 0,
+        ok: true,
+        messages: vec![format!("run {i}")],
+        millis: 0,
+        outputs: Vec::new(),
+    };
+    let history = |s: &Session, mark: u64| {
+        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("history's")).collect::<Vec<_>>()
+    };
+    let mut g = world();
+    g.project.gp_history = (0..250).map(run).collect();
+    let mark = g.notice_mark();
+    g.run("task.new", &json!({"name": "Replay", "fromHistory": true})).unwrap();
+    let replay = g.project.tasks.iter().find(|t| t.name == "Replay").unwrap();
+    assert_eq!((replay.steps.len(), replay.steps[199].instructions.as_str()), (200, "run 199"));
+    assert_eq!(history(&g, mark), ["Replay: the task takes the first 200 of the history's 250 runs"]);
+    g.project.gp_history.truncate(200);
+    let mark = g.notice_mark();
+    g.run("task.new", &json!({"name": "Short", "fromHistory": true})).unwrap();
+    assert_eq!(g.project.tasks.iter().find(|t| t.name == "Short").map(|t| t.steps.len()), Some(200));
+    assert!(history(&g, mark).is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
