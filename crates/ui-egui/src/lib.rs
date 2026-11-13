@@ -631,7 +631,6 @@ pub enum RightPane {
     Geoprocessing,
     Symbology,
     History,
-    Details,
     Editing,
     Design,
     Workflows,
@@ -2442,6 +2441,9 @@ impl RustGisApp {
             if id == "service.add" && params.get("text").and_then(Value::as_str).is_some() {
                 return readjob::run(self, "service.add", params);
             }
+            if id == "layer.repairSource" {
+                return readjob::run(self, "layer.repairSource", params);
+            }
             let archive = match id {
                 "map.reloadTiles" => Some("map.reloadTiles"),
                 "map.repairTiles" => Some("map.repairTiles"),
@@ -2974,7 +2976,16 @@ impl RustGisApp {
                 toggle_right(&mut self.ui, RightPane::Symbology)
             }
             "ui.pane.history" => toggle_right(&mut self.ui, RightPane::History),
-            "ui.pane.details" => toggle_right(&mut self.ui, RightPane::Details),
+            // The Layer Properties pane on its Source tab (#1803), for the layer given (`{"layer"}`)
+            // or the selected one; with neither, it hides the pane when it is in view on Source.
+            "ui.pane.details" => {
+                let layer = p.get("layer").filter(|l| !l.is_null());
+                if layer.is_none() && layerprops::source_in_view(&self.ui) {
+                    self.ui.close_right(RightPane::LayerProperties);
+                } else {
+                    return self.run_ui("ui.pane.layerProperties", &json!({"tab": "source", "layer": layer}));
+                }
+            }
             "ui.pane.editing" => toggle_right(&mut self.ui, RightPane::Editing),
             "ui.pane.design" => toggle_right(&mut self.ui, RightPane::Design),
             "ui.pane.script" => toggle_right(&mut self.ui, RightPane::Script),
