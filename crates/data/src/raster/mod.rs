@@ -1626,6 +1626,21 @@ pub(crate) mod tests {
                 assert_eq!(got.categories, want.categories, "{name} on {threads}");
             }
         }
+        // A validity that depends on the cell's place, as a see-through cell's does (#1810): each
+        // run is given where it starts, so several threads leave out the same cells as one. A
+        // cell's place is checked against its band too: every third one is left out, and so is
+        // the band's last cell, which a run off by one would miss or count twice.
+        for (name, data) in &bands {
+            let by_place = |i: usize, v: f32| value(v) && !i.is_multiple_of(3) && i + 1 != data.len();
+            let kept: Vec<f32> = data.iter().enumerate().map(|(i, &v)| if by_place(i, v) { v } else { f32::NAN }).collect();
+            let want = one_pass(&kept, value);
+            for threads in [1, 2, 7, 16] {
+                let got = BandStats::compute_on(data, by_place, None, threads);
+                assert_eq!(bits(&got), bits(&want), "{name} by place on {threads}");
+                assert_eq!(got.histogram, want.histogram, "{name} by place on {threads}");
+                assert_eq!(got.categories, want.categories, "{name} by place on {threads}");
+            }
+        }
         assert!(BandStats::compute_on(&bands[1].1, valid, None, 2).categories.is_none(), "257 small whole values");
         assert!(BandStats::compute_on(&bands[3].1, valid, None, 2).categories.is_none(), "400 in two runs of 200");
         // A band too small for threads, and one with no valid value.
