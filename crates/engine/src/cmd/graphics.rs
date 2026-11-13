@@ -21,7 +21,8 @@ pub fn commands() -> Vec<C> {
     vec![
         C::new("graphics.newLayer", "Add Graphics Layer", "Home › Add", |s, p| {
             let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Graphics");
-            let id = new_layer(s, name);
+            let name = super::within("name", "a layer's name", name, 200)?;
+            let id = new_layer(s, &name);
             Ok(json!({"layer": id}))
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .params(r#"{"name"?: string}"#),
@@ -286,7 +287,7 @@ fn add(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("unknown shape '{shape}'"));
     }
     let g = geometry(&shape, points(p)?)?;
-    let text = ps(p, "text").map(|t| t.chars().take(2000).collect::<String>());
+    let text = ps(p, "text").map(|t| super::within("text", "a graphic's text", t, 2000)).transpose()?;
     if shape == "text" && text.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("text is required".into());
     }
@@ -380,7 +381,7 @@ fn edit(s: &mut Session, p: &Value) -> CmdResult {
 /// Sets the style (and a text graphic's text) of one graphic, or else of the selected ones.
 fn restyle(s: &mut Session, p: &Value, one: Option<(u32, usize)>) -> CmdResult {
     let (fill, outline) = (color(p, "fill")?, color(p, "outline")?);
-    let text = ps(p, "text").map(|t| t.chars().take(2000).collect::<String>());
+    let text = ps(p, "text").map(|t| super::within("text", "a graphic's text", t, 2000)).transpose()?;
     // Font sizes are kept within the range they are drawn at (graphics::font_size).
     let fonts = &graphics::FONT_SIZE;
     let nums = [("width", "width", 0.0, 50.0), ("size", "size", 0.0, 200.0), ("font_size", "fontSize", *fonts.start(), *fonts.end())];

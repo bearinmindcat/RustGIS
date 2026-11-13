@@ -44301,3 +44301,78 @@ fn publication_writes_its_coverage_grid() {
     assert!(r["coverage"].is_null() && !r["warnings"].to_string().contains("coverage"), "{r}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Commands refuse a name, a text or a list over its limit rather than cutting it without a word
+/// (#1888), as `layer.rename` refuses a long name (#1817): the error gives the length and the
+/// limit, and nothing changes. A value at its limit is taken whole, and characters are counted, not
+/// bytes (each `é` is two).
+#[test]
+fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
+    let mut s = world();
+    let at = |n: usize| "é".repeat(n);
+    let refused = |r: Result<Value, String>, what: &str, n: usize, limit: usize| {
+        let e = r.unwrap_err();
+        assert!(e.contains(&format!("{n} characters")) && e.contains(&format!("at most {limit}")), "{what}: {e}");
+    };
+    let too_many = |r: Result<Value, String>, what: &str, n: usize, limit: usize| {
+        let e = r.unwrap_err();
+        assert!(e.contains(&format!("{n} entries")) && e.contains(&format!("at most {limit}")), "{what}: {e}");
+    };
+    // A graphics layer's name, and a graphic's text, added and restyled.
+    let layers = s.map().layers.len();
+    refused(s.run("graphics.newLayer", &json!({"name": at(201)})), "graphics layer", 201, 200);
+    assert_eq!(s.map().layers.len(), layers, "no layer added");
+    let graphics = s.run("graphics.newLayer", &json!({"name": at(200)})).unwrap()["layer"].clone();
+    assert_eq!(s.map().layers.len(), layers + 1);
+    let pt = json!([[0, 0]]);
+    refused(s.run("graphics.add", &json!({"shape": "text", "points": pt, "text": at(2001)})), "graphic text", 2001, 2000);
+    s.run("graphics.add", &json!({"shape": "text", "points": pt, "text": at(2000)})).unwrap();
+    // Restyled by layer and row, as `graphics.style` restyles the selected ones (the same code).
+    refused(s.run("graphics.edit", &json!({"layer": graphics, "row": 0, "text": at(2001)})), "graphic edited", 2001, 2000);
+    // A task's name, description and steps, and a step's title and instructions.
+    refused(s.run("task.new", &json!({"name": at(201)})), "task name", 201, 200);
+    refused(s.run("task.new", &json!({"name": "T", "description": at(2001)})), "task description", 2001, 2000);
+    let step = json!({"title": "Zoom", "command": "map.goToXY", "params": {"lon": 0, "lat": 0, "scale": 1e6}});
+    too_many(s.run("task.new", &json!({"name": "Long", "steps": vec![step.clone(); 201]})), "task steps", 201, 200);
+    assert!(s.project.tasks.is_empty(), "no task added");
+    s.run("task.new", &json!({"name": "Lesson", "description": at(2000), "steps": vec![step; 200]})).unwrap();
+    assert_eq!((s.project.tasks[0].description.chars().count(), s.project.tasks[0].steps.len()), (2000, 200));
+    refused(s.run("task.editStep", &json!({"task": "Lesson", "step": 0, "title": at(201)})), "step title", 201, 200);
+    refused(s.run("task.editStep", &json!({"task": "Lesson", "step": 0, "instructions": at(4001)})), "step instructions", 4001, 4000);
+    assert_eq!(s.project.tasks[0].steps[0].title, "Zoom", "unchanged");
+    s.run("task.editStep", &json!({"task": "Lesson", "step": 0, "instructions": at(4000)})).unwrap();
+    // A group's name.
+    let cities = s.map().layer_by_name("Cities").unwrap().id;
+    refused(s.run("group.add", &json!({"name": at(201), "layers": [cities]})), "group", 201, 200);
+    // A display filter's name, and more filters than a layer takes.
+    let filter = |name: String| json!({"name": name, "where": "pop_max > 5000000"});
+    refused(s.run("layer.displayFilters", &json!({"layer": "Cities", "filters": [filter(at(101))]})), "filter name", 101, 100);
+    too_many(s.run("layer.displayFilters", &json!({"layer": "Cities", "filters": vec![filter("f".into()); 51]})), "filters", 51, 50);
+    s.run("layer.displayFilters", &json!({"layer": "Cities", "filters": [filter(at(100))]})).unwrap();
+    // A feature template's description.
+    refused(s.run("edit.template", &json!({"layer": "Cities", "name": "T", "description": at(501)})), "template description", 501, 500);
+    // A saved template's name, and the project opened from one.
+    let dir = std::env::temp_dir().join(format!("rustgis-over-limit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("t.rgistemplate").display().to_string();
+    refused(s.run("project.saveTemplate", &json!({"path": path, "name": at(201)})), "template name", 201, 200);
+    s.run("project.saveTemplate", &json!({"path": path})).unwrap();
+    let mut t = Session::new(Project::default());
+    refused(t.run("project.fromTemplate", &json!({"path": path, "name": at(201)})), "project name", 201, 200);
+    t.run("project.fromTemplate", &json!({"path": path, "name": at(200)})).unwrap();
+    assert_eq!(t.project.name.chars().count(), 200);
+    // An imagery tool's output name.
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    let rasters = s.map().layers.iter().filter(|l| l.is_raster()).count();
+    refused(s.run("raster.classify", &json!({"layer": dem, "classes": 3, "name": at(201)})), "output name", 201, 200);
+    assert_eq!(s.map().layers.iter().filter(|l| l.is_raster()).count(), rasters, "no raster added");
+    // A subtype's name, and more subtypes than a field takes.
+    let mut h = numbered_points(&[0, 7]);
+    let sub = |name: String| json!({"layer": "Herds", "field": "n", "subtypes": [{"code": 0, "name": name}]});
+    refused(h.run("data.subtypes", &sub(at(201))), "subtype name", 201, 200);
+    let many: Vec<Value> = (0..1001).map(|i| json!({"code": i, "name": "s"})).collect();
+    too_many(h.run("data.subtypes", &json!({"layer": "Herds", "field": "n", "subtypes": many})), "subtypes", 1001, 1000);
+    h.run("data.subtypes", &sub(at(200))).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -1583,9 +1583,15 @@ fn subtypes(s: &mut Session, p: &Json) -> CmdResult {
     let fname = f.name.clone();
     let list = p.get("subtypes").and_then(Json::as_array).ok_or("subtypes is required")?;
     let mut subs = Vec::new();
-    for v in list.iter().take(1000) {
+    super::at_most("subtypes", "a field", list, 1000)?;
+    for v in list {
         let code = v.get("code").and_then(Json::as_i64).ok_or("each subtype has an integer code")?;
-        let name = v.get("name").and_then(Json::as_str).ok_or("each subtype has a name")?.chars().take(200).collect();
+        let name = super::within(
+            "a subtype's name",
+            "a subtype's name",
+            v.get("name").and_then(Json::as_str).ok_or("each subtype has a name")?,
+            200,
+        )?;
         let defaults: Vec<(String, Value)> = v
             .get("defaults")
             .and_then(Json::as_object)
@@ -1884,6 +1890,7 @@ fn related(s: &mut Session, p: &Json) -> CmdResult {
 fn template(s: &mut Session, p: &Json) -> CmdResult {
     let id = s.layer_id(p)?;
     let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).ok_or("name is required")?.to_string();
+    let description = super::within("description", "a template's description", ps(p, "description").unwrap_or(""), 500)?;
     let l = s.map_mut().layer_mut(id).ok_or("no such layer")?;
     if b(p, "remove").unwrap_or(false) {
         let before = l.design.templates.len();
@@ -1908,11 +1915,7 @@ fn template(s: &mut Session, p: &Json) -> CmdResult {
         }
     }
     l.design.templates.retain(|t| !t.name.eq_ignore_ascii_case(&name));
-    l.design.templates.push(FeatureTemplate {
-        name: name.clone(),
-        description: ps(p, "description").unwrap_or("").chars().take(500).collect(),
-        defaults,
-    });
+    l.design.templates.push(FeatureTemplate { name: name.clone(), description, defaults });
     Ok(json!({"template": name, "templates": l.design.templates.len()}))
 }
 
