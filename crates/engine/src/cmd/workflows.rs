@@ -571,8 +571,9 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
         return Err(format!("name is {length} characters: a model's name takes at most {MAX_MODEL_NAME}"));
     }
     let (graph, dropped) = read_graph(p)?;
-    // From the history: the successful runs left out for a tool that isn't available.
-    let (mut from_history, mut unavailable) = (false, 0usize);
+    // From the history: the successful runs left out for a tool that isn't available, and the
+    // steps that read a layer one of them made.
+    let (mut from_history, mut unavailable, mut unmade) = (false, 0usize, 0usize);
     let steps: Vec<ModelStep> = match p.get("steps") {
         _ if graph.is_some() => graph.as_ref().map(crate::model::graph_to_steps).unwrap_or_default(),
         // Steps given past a model's limit are refused, not cut.
@@ -588,10 +589,14 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
             // Each successful run becomes a step; inputs naming an earlier run's output become
             // references to it, so the model re-runs as a chain.
             let mut steps: Vec<ModelStep> = Vec::new();
-            let mut outputs: Vec<Vec<String>> = Vec::new();
+            // Each run's outputs in the history's order, with its step when it's replayed: a run
+            // left out still made what it made, so a later step isn't wired to an older run's
+            // output of the same name.
+            let mut makers: Vec<(Option<usize>, &[String])> = Vec::new();
             for r in s.project.gp_history.iter().filter(|r| r.ok) {
                 let Some(tool) = super::gp::tool_id(&r.tool) else {
                     unavailable += 1;
+                    makers.push((None, r.outputs.as_slice()));
                     continue;
                 };
                 let mut params = r.params.clone();
@@ -609,18 +614,25 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
                         )
                     })
                 };
+                let mut reads_unmade = false;
                 if let Value::Object(o) = &mut params {
                     for (key, v) in o.iter_mut() {
                         if let Some(t) = v.as_str().filter(|_| is_layer(key))
                             // The latest run that made that name (names can be reused).
-                            && let Some(k) = outputs.iter().rposition(|outs| outs.iter().any(|x| x == t))
+                            && let Some(&(made_by, _)) = makers.iter().rev().find(|(_, outs)| outs.iter().any(|x| x == t))
                         {
-                            *v = json!(format!("%{}", k + 1));
+                            match made_by {
+                                Some(k) => *v = json!(format!("%{}", k + 1)),
+                                // Made by a run left out: the step reads the layer of that name,
+                                // as the project has it, and that is said.
+                                None => reads_unmade = true,
+                            }
                         }
                     }
                 }
+                unmade += usize::from(reads_unmade);
+                makers.push((Some(steps.len()), r.outputs.as_slice()));
                 steps.push(ModelStep { tool: tool.to_string(), params });
-                outputs.push(r.outputs.clone());
             }
             steps
         }
@@ -651,9 +663,8 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     let n = steps.len();
     s.project.models.push(Model { name: name.clone(), steps, graph });
     notify_graph_dropped(s, dropped);
-    // An import says its own notice for a name it changed (`model.import`), so this is said once.
     let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
-    if kept < length && !b(p, "imported").unwrap_or(false) {
+    if kept < length {
         s.notify(
             format!("ModelBuilder: a model has that name already, so the name given is cut to {kept} characters to fit \" {i}\""),
             false,
@@ -667,6 +678,12 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
             format!("{unavailable} successful runs in the history use a tool that isn't available, so they're left out")
         };
         s.notify(format!("{name}: {said}"), false);
+    }
+    if unmade > 0 {
+        s.notify(
+            format!("{name}: {unmade} step(s) read a layer made by a run that's left out, so they read the project's layer of that name"),
+            false,
+        );
     }
     if from_history && replayable > n {
         s.notify(

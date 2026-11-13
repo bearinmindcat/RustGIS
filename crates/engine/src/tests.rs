@@ -11161,6 +11161,31 @@ fn model_new_refuses_or_says_what_it_leaves() {
     let mark = s.notice_mark();
     assert_eq!(s.run("model.new", &json!({"name": "Few", "fromHistory": true})).unwrap()["steps"], 2);
     assert_eq!(history(&s, mark), ["Few: 1 successful run in the history uses a tool that isn't available, so it's left out"]);
+    // A run left out that made a layer a later step reads: the step isn't wired to an older run's
+    // output of that name, but reads the layer by its name, and that is said. Without the run left
+    // out, the step is wired to the older run.
+    let making = |i: usize, input: &str| crate::GpRecord {
+        params: json!({"input": input, "distance": i}),
+        outputs: vec!["Made".to_string()],
+        ..run(i)
+    };
+    s.project.gp_history = vec![making(0, "Cities"), crate::GpRecord { tool: "Mystery".into(), ..making(1, "Cities") }, making(2, "Made")];
+    let mark = s.notice_mark();
+    s.run("model.new", &json!({"name": "Rewired", "fromHistory": true})).unwrap();
+    let rewired = s.project.models.iter().find(|m| m.name == "Rewired").unwrap();
+    assert_eq!(rewired.steps[1].params["input"], "Made", "not %1, the older run's output");
+    assert_eq!(
+        said(&s, mark, "Rewired:"),
+        [
+            "Rewired: 1 successful run in the history uses a tool that isn't available, so it's left out",
+            "Rewired: 1 step(s) read a layer made by a run that's left out, so they read the project's layer of that name",
+        ]
+    );
+    s.project.gp_history = vec![making(0, "Cities"), making(2, "Made")];
+    let mark = s.notice_mark();
+    s.run("model.new", &json!({"name": "Wired", "fromHistory": true})).unwrap();
+    assert_eq!(s.project.models.iter().find(|m| m.name == "Wired").unwrap().steps[1].params["input"], "%1");
+    assert!(said(&s, mark, "Wired:").is_empty());
     // A clean history of 2,000 runs: all replayed, nothing said.
     s.project.gp_history = (0..2000).map(run).collect();
     let mark = s.notice_mark();

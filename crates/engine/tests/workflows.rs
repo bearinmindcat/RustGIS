@@ -293,8 +293,16 @@ fn model_import_reports_changed_names() {
         assert!(!loaded.notices[0].error && loaded.notices[0].text.contains("1 model name"));
         assert_eq!(serde_json::to_value(loaded.project.models[0].graph.as_ref().unwrap()).unwrap(), file["graph"]);
     }
+    // `model.new` called with `imported` itself (a script may) says the cut too.
+    let mut direct = Session::new(Project::new("Direct"));
+    for _ in 0..2 {
+        direct.notices.clear();
+        direct.run("model.new", &json!({"name": "N".repeat(200), "graph": file["graph"], "imported": true})).unwrap();
+    }
+    assert_eq!(direct.notices.len(), 1, "{:?}", direct.notices);
+    assert!(direct.notices[0].text.contains("cut to 198 characters"), "{:?}", direct.notices);
     // A 200-character name imported twice: the second is told apart within the 200, and that
-    // is said once, by the import.
+    // is said once, by `model.new`, whose notice says how.
     file["name"] = json!("N".repeat(200));
     let mut loaded = Session::new(Project::new("Loaded"));
     for _ in 0..2 {
@@ -304,7 +312,7 @@ fn model_import_reports_changed_names() {
     let second = &loaded.project.models[1].name;
     assert_eq!((second.chars().count(), second.ends_with(" 2")), (200, true));
     assert_eq!(loaded.notices.len(), 1, "{:?}", loaded.notices);
-    assert!(loaded.notices[0].text.contains("1 model name"));
+    assert!(loaded.notices[0].text.contains("cut to 198 characters"), "{:?}", loaded.notices);
     file.as_object_mut().unwrap().remove("name");
     let mut loaded = Session::new(Project::new("Loaded"));
     loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
