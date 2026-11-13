@@ -573,7 +573,7 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     let (graph, dropped) = read_graph(p)?;
     // From the history: the successful runs left out for a tool that isn't available, and the
     // steps that read a layer one of them made.
-    let (mut from_history, mut unavailable, mut unmade) = (false, 0usize, 0usize);
+    let (mut from_history, mut unavailable, mut unmade_at) = (false, 0usize, Vec::<usize>::new());
     let steps: Vec<ModelStep> = match p.get("steps") {
         _ if graph.is_some() => graph.as_ref().map(crate::model::graph_to_steps).unwrap_or_default(),
         // Steps given past a model's limit are refused, not cut.
@@ -630,7 +630,9 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
                         }
                     }
                 }
-                unmade += usize::from(reads_unmade);
+                if reads_unmade {
+                    unmade_at.push(steps.len());
+                }
                 makers.push((Some(steps.len()), r.outputs.as_slice()));
                 steps.push(ModelStep { tool: tool.to_string(), params });
             }
@@ -661,6 +663,8 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
         name = base.chars().take(MAX_MODEL_NAME - suffix.chars().count()).chain(suffix.chars()).collect();
     }
     let n = steps.len();
+    // Of the steps the model keeps.
+    let unmade = unmade_at.iter().filter(|&&i| i < n).count();
     s.project.models.push(Model { name: name.clone(), steps, graph });
     notify_graph_dropped(s, dropped);
     let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };

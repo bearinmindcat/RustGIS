@@ -313,6 +313,14 @@ fn model_import_reports_changed_names() {
     assert_eq!((second.chars().count(), second.ends_with(" 2")), (200, true));
     assert_eq!(loaded.notices.len(), 1, "{:?}", loaded.notices);
     assert!(loaded.notices[0].text.contains("cut to 198 characters"), "{:?}", loaded.notices);
+    // A 250-character name over a 200-character one: the import's cut to 200 is said too, beside
+    // `model.new`'s cut to fit " 3".
+    file["name"] = json!("N".repeat(250));
+    loaded.notices.clear();
+    loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
+    let texts: Vec<&str> = loaded.notices.iter().map(|n| n.text.as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("cut to 198 characters")) && texts.iter().any(|t| t.contains("1 model name")), "{texts:?}");
     file.as_object_mut().unwrap().remove("name");
     let mut loaded = Session::new(Project::new("Loaded"));
     loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();

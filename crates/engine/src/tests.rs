@@ -11186,6 +11186,21 @@ fn model_new_refuses_or_says_what_it_leaves() {
     s.run("model.new", &json!({"name": "Wired", "fromHistory": true})).unwrap();
     assert_eq!(s.project.models.iter().find(|m| m.name == "Wired").unwrap().steps[1].params["input"], "%1");
     assert!(said(&s, mark, "Wired:").is_empty());
+    // A step past the 2,000 a model keeps that reads such a layer isn't counted: the model has
+    // none.
+    let mut long: Vec<crate::GpRecord> = (0..2000).map(run).collect();
+    long.push(crate::GpRecord { tool: "Mystery".into(), ..making(2000, "Cities") });
+    long.push(making(2001, "Made"));
+    s.project.gp_history = long;
+    let mark = s.notice_mark();
+    assert_eq!(s.run("model.new", &json!({"name": "Late", "fromHistory": true})).unwrap()["steps"], 2000);
+    assert_eq!(
+        said(&s, mark, "Late:"),
+        [
+            "Late: 1 successful run in the history uses a tool that isn't available, so it's left out",
+            "Late: the model takes the first 2000 of the 2001 successful runs it can replay from the history",
+        ]
+    );
     // A clean history of 2,000 runs: all replayed, nothing said.
     s.project.gp_history = (0..2000).map(run).collect();
     let mark = s.notice_mark();
