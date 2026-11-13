@@ -44481,7 +44481,29 @@ fn lists_past_their_limit_are_refused_or_said() {
         let r = s.run("bookmark.import", &json!({"text": many(n)})).unwrap();
         assert_eq!(r["added"].as_array().map(Vec::len), Some(kept));
         let names: Vec<&str> = s.map().bookmarks.iter().map(|b| b.name.as_str()).collect();
-        assert_eq!((names.len(), names[0], names[kept - 1]), (kept, "B0", format!("B{}", kept - 1).as_str()));
+        // Each kept at its place in the file: the i-th is B{i}.
+        assert_eq!(names.len(), kept);
+        assert_eq!(names.iter().enumerate().find(|(i, n)| **n != format!("B{i}")), None);
         assert_eq!(said(&s, mark, "Import Bookmarks"), note);
     }
+    // The limit counts bookmarks kept, not the file's entries: one without a name first, then
+    // 10,000 good ones, are all taken, and only the one without a name is said.
+    s.run("map.new", &json!({"name": "Bookmarks skipped first"})).unwrap();
+    let mut file: Vec<Value> = vec![json!({"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0})];
+    file.extend((0..10_000).map(|i| place(format!("B{i}"))));
+    let mark = s.notice_mark();
+    let r = s.run("bookmark.import", &json!({"text": json!({"bookmarks": file}).to_string()})).unwrap();
+    assert_eq!((r["added"].as_array().map(Vec::len), s.map().bookmarks.len()), (Some(10_000), 10_000));
+    assert_eq!(s.map().bookmarks.iter().enumerate().find(|(i, b)| b.name != format!("B{i}")).map(|(i, _)| i), None);
+    assert_eq!(said(&s, mark, "Import Bookmarks"), ["Import Bookmarks: 1 bookmark(s) without a name left out"]);
+    // The full map: a bookmark replacing one by its name is taken, a new one is left out and said.
+    s.run("map.activate", &json!({"name": "Bookmarks 10000"})).unwrap();
+    let mark = s.notice_mark();
+    let mut again = place("b5".into());
+    again["description"] = json!("Moved");
+    let r = s.run("bookmark.import", &json!({"text": json!({"bookmarks": [again, place("Extra".into())]}).to_string()})).unwrap();
+    assert_eq!(r["added"], json!(["b5"]));
+    assert_eq!(s.map().bookmarks.iter().find(|b| b.name == "B5").map(|b| b.description.as_str()), Some("Moved"));
+    assert_eq!(s.map().bookmarks.len(), 10_000);
+    assert_eq!(said(&s, mark, "Import Bookmarks"), ["Import Bookmarks: 1 bookmark(s) past the map's 10000 left out"]);
 }

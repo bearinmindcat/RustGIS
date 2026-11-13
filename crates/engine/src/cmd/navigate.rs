@@ -745,13 +745,16 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
     let list = v.get("bookmarks").and_then(Value::as_array).ok_or("not a RustGIS bookmarks file: no bookmarks")?;
     let m = s.map_mut();
     let mut names = Vec::new();
+    // The map's bookmarks by name (the first of any that differ only in case, as found before),
+    // and the names this file added or replaced: a file of many entries is read in one pass.
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, b) in m.bookmarks.iter().enumerate() {
+        at.entry(b.name.to_ascii_lowercase()).or_insert(i);
+    }
+    let mut taken = std::collections::HashSet::new();
     // What the file has that isn't taken, counted to be said (#1896).
-    let (mut read, mut no_name, mut no_place, mut cut_names, mut cut_descriptions) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    for b in list.iter().take(MAX_BOOKMARKS) {
-        if m.bookmarks.len() >= MAX_BOOKMARKS {
-            break;
-        }
-        read += 1;
+    let (mut no_name, mut no_place, mut past, mut cut_names, mut cut_descriptions) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    for b in list {
         // A cut name is counted once the bookmark is kept, below.
         let (name, name_cut): (String, bool) = match super::ps(b, "name").map(str::trim).filter(|n| !n.is_empty()) {
             Some(n) => (n.chars().take(MAX_BOOKMARK_NAME).collect(), n.chars().nth(MAX_BOOKMARK_NAME).is_some()),
@@ -772,6 +775,14 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
             no_place += 1;
             continue;
         };
+        // A new bookmark past the map's limit is left out; one replacing a bookmark by its name
+        // is taken, as it adds none.
+        let key = name.to_ascii_lowercase();
+        let existing = at.get(&key).copied();
+        if existing.is_none() && m.bookmarks.len() >= MAX_BOOKMARKS {
+            past += 1;
+            continue;
+        }
         cut_names += usize::from(name_cut);
         // A file from before bearings faces north.
         camera.set_bearing(f(b, "bearing").unwrap_or(0.0));
@@ -784,20 +795,22 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
         });
         // A bookmark by the same name is replaced where it is in the list (importing a file
         // again updates its bookmarks).
-        match m.bookmarks.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&name)) {
+        match existing.and_then(|i| m.bookmarks.get_mut(i)) {
             Some(b) => {
                 b.camera = camera;
                 if let Some(d) = description {
                     b.description = d;
                 }
             }
-            None => m.bookmarks.push(Bookmark { description: description.unwrap_or_default(), ..Bookmark::new(name.clone(), camera) }),
+            None => {
+                at.insert(key.clone(), m.bookmarks.len());
+                m.bookmarks.push(Bookmark { description: description.unwrap_or_default(), ..Bookmark::new(name.clone(), camera) });
+            }
         }
-        if !names.iter().any(|n: &String| n.eq_ignore_ascii_case(&name)) {
+        if taken.insert(key) {
             names.push(name);
         }
     }
-    let past = list.len() - read;
     let left: Vec<String> = [
         (no_name, "without a name left out".to_string()),
         (no_place, "without a place this map can show left out".to_string()),
