@@ -135,10 +135,17 @@ pub fn commands() -> Vec<C> {
         .params(r#"{"report"?, "field": name, "remove"?: bool}"#),
         C::new("report.autofill", "Autofill Fields", "Data › Data Design", |s, p| {
             let i = index(s, p)?;
-            let names = layer_of(s, i)?.dataset.fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect::<Vec<_>>();
+            let fields = &layer_of(s, i)?.dataset.fields;
+            let all = fields.len();
+            let names = fields.iter().take(MAX_ITEMS).map(|f| f.name.clone()).collect::<Vec<_>>();
             let r = s.project.reports.get_mut(i).ok_or("no report")?;
             r.fields = names;
-            Ok(json!({"fields": r.fields}))
+            let (answer, report) = (json!({"fields": r.fields}), r.name.clone());
+            // A layer with more fields than a report takes: the first are filled in, and that is said (#1896).
+            if all > MAX_ITEMS {
+                s.notify(format!("{report}: the first {MAX_ITEMS} of the layer's {all} fields are filled in"), false);
+            }
+            Ok(answer)
         }).inputs(layer_inputs).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_report)
         .params(r#"{"report"?}"#),

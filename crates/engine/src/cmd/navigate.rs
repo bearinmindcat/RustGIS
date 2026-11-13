@@ -745,25 +745,44 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
     let list = v.get("bookmarks").and_then(Value::as_array).ok_or("not a RustGIS bookmarks file: no bookmarks")?;
     let m = s.map_mut();
     let mut names = Vec::new();
+    // What the file has that isn't taken, counted to be said (#1896).
+    let (mut read, mut no_name, mut no_place, mut cut_names, mut cut_descriptions) = (0usize, 0usize, 0usize, 0usize, 0usize);
     for b in list.iter().take(MAX_BOOKMARKS) {
         if m.bookmarks.len() >= MAX_BOOKMARKS {
             break;
         }
+        read += 1;
         let name: String = match super::ps(b, "name").map(str::trim).filter(|n| !n.is_empty()) {
-            Some(n) => n.chars().take(MAX_BOOKMARK_NAME).collect(),
-            None => continue,
+            Some(n) => {
+                cut_names += usize::from(n.chars().nth(MAX_BOOKMARK_NAME).is_some());
+                n.chars().take(MAX_BOOKMARK_NAME).collect()
+            }
+            None => {
+                no_name += 1;
+                continue;
+            }
         };
-        let (Some(lon), Some(lat), Some(ground)) = (f(b, "lon"), f(b, "lat"), f(b, "metresPerPixel")) else { continue };
+        let (Some(lon), Some(lat), Some(ground)) = (f(b, "lon"), f(b, "lat"), f(b, "metresPerPixel")) else {
+            no_place += 1;
+            continue;
+        };
         if !(lon.is_finite() && lat.is_finite() && (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat)) {
+            no_place += 1;
             continue;
         }
-        let Some(mut camera) = place_at(m, Coord::new(lon, lat), ground) else { continue };
+        let Some(mut camera) = place_at(m, Coord::new(lon, lat), ground) else {
+            no_place += 1;
+            continue;
+        };
         // A file from before bearings faces north.
         camera.set_bearing(f(b, "bearing").unwrap_or(0.0));
         camera.set_pitch(f(b, "pitch").unwrap_or(0.0));
         // Absent (a file from before descriptions, or written by hand) isn't empty: a bookmark
         // it replaces keeps its own.
-        let description: Option<String> = super::ps(b, "description").map(|d| d.trim().chars().take(MAX_DESCRIPTION).collect());
+        let description: Option<String> = super::ps(b, "description").map(|d| {
+            cut_descriptions += usize::from(d.trim().chars().nth(MAX_DESCRIPTION).is_some());
+            d.trim().chars().take(MAX_DESCRIPTION).collect()
+        });
         // A bookmark by the same name is replaced where it is in the list (importing a file
         // again updates its bookmarks).
         match m.bookmarks.iter_mut().find(|b| b.name.eq_ignore_ascii_case(&name)) {
@@ -781,6 +800,18 @@ fn import_bookmarks(s: &mut Session, p: &Value) -> CmdResult {
     }
     if names.is_empty() {
         return Err("the file has no bookmarks this map can show".into());
+    }
+    let past = list.len() - read;
+    for (n, what) in [
+        (no_name, "without a name left out".to_string()),
+        (no_place, "without a place this map can show left out".to_string()),
+        (past, format!("past the map's {MAX_BOOKMARKS} left out")),
+        (cut_names, format!("with a name cut to {MAX_BOOKMARK_NAME} characters")),
+        (cut_descriptions, format!("with a description cut to {MAX_DESCRIPTION} characters")),
+    ] {
+        if n > 0 {
+            s.notify(format!("Import Bookmarks: {n} bookmark(s) {what}"), false);
+        }
     }
     Ok(json!({"added": names}))
 }

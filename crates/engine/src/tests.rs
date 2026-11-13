@@ -44301,3 +44301,120 @@ fn publication_writes_its_coverage_grid() {
     assert!(r["coverage"].is_null() && !r["warnings"].to_string().contains("coverage"), "{r}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Commands that take the first N of a list refuse a list given over its limit, and say what
+/// they leave of one they work out or read (#1896): `raster.measure`'s points; the lines
+/// `profile.alongSelected` profiles; the steps `map.route`'s answer lists; the fields
+/// `report.autofill` fills in; what `bookmark.import` leaves of a file. Nothing is said within
+/// the limits.
+#[test]
+fn lists_past_their_limit_are_refused_or_said() {
+    let said = |s: &Session, mark: u64, what: &str| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains(what)).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let mut s = world();
+    // A measurement's points: refused past 10,000, taken at 10,000.
+    let ring = |n: usize| -> Vec<Value> {
+        (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                json!([10.0 + a.cos() * 0.01, 45.0 + a.sin() * 0.01])
+            })
+            .collect()
+    };
+    let e = s.run("raster.measure", &json!({"kind": "area", "points": ring(10_001)})).unwrap_err();
+    assert!(e.contains("10001 entries") && e.contains("at most 10000"), "{e}");
+    s.run("raster.measure", &json!({"kind": "area", "points": ring(10_000)})).unwrap();
+    // Profiles along 51 lines: the first 50, and said; along 50, nothing said.
+    s.run("layer.addDataBytes", &json!({"fileName": "dem.tif", "data": dem_b64()})).unwrap();
+    let dem = s.map().layers.iter().find(|l| l.is_raster()).unwrap().name.clone();
+    s.run("layer.template", &json!({"template": "lines", "name": "Trails"})).unwrap();
+    for i in 0..51 {
+        let y = 45.002 + i as f64 * 0.0005;
+        s.run(
+            "edit.addFeature",
+            &json!({"layer": "Trails", "geometry": {"type": "LineString", "coordinates": [[10.002, y], [10.038, y]]}}),
+        )
+        .unwrap();
+    }
+    // Adding a feature selects it alone: every line is selected here.
+    s.run("select.all", &json!({"layer": "Trails"})).unwrap();
+    let mark = s.notice_mark();
+    let out = s.run("profile.alongSelected", &json!({"layer": dem, "lines": "Trails"})).unwrap();
+    assert_eq!(out.as_array().map(Vec::len), Some(50));
+    assert_eq!(said(&s, mark, "Profile Along Selected Lines"), ["Profile Along Selected Lines: the first 50 of the 51 lines are profiled"]);
+    s.run("layer.template", &json!({"template": "lines", "name": "Fifty"})).unwrap();
+    for i in 0..50 {
+        let y = 45.002 + i as f64 * 0.0005;
+        s.run("edit.addFeature", &json!({"layer": "Fifty", "geometry": {"type": "LineString", "coordinates": [[10.002, y], [10.038, y]]}}))
+            .unwrap();
+    }
+    s.run("select.all", &json!({"layer": "Fifty"})).unwrap();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("profile.alongSelected", &json!({"layer": dem, "lines": "Fifty"})).unwrap().as_array().map(Vec::len), Some(50));
+    assert!(said(&s, mark, "Profile Along").is_empty());
+    // A route of 201 steps: the answer lists 200 and says so; the steps layer has 201.
+    let step = r#"{"geometry":"g~idcBwjpoXl@InGo@","name":"Main St","distance":10.0,"duration":2.0,"maneuver":{"instruction":"Go on.","type":"continue","location":[13.378236,52.51634]}}"#;
+    let route = |n: usize| {
+        format!(
+            r#"{{"code":"Ok","routes":[{{"duration":402.0,"distance":2010.0,"legs":[{{"summary":"Main St","steps":[{}]}}]}}]}}"#,
+            vec![step; n].join(",")
+        )
+    };
+    let mut t = Session::new(Project::default());
+    let mark = t.notice_mark();
+    let r = t.run("map.route", &json!({"answer": route(201), "zoom": false})).unwrap();
+    assert_eq!(r["steps"].as_array().map(Vec::len), Some(200));
+    assert_eq!(t.map().layer_by_name("Route steps").map(|l| l.dataset.features.len()), Some(201));
+    assert_eq!(
+        said(&t, mark, "Directions"),
+        ["Directions: the answer lists the first 200 of the route's 201 steps; the Route steps layer has them all"]
+    );
+    let mark = t.notice_mark();
+    t.run("map.route", &json!({"answer": route(201), "zoom": false, "addLayer": false})).unwrap();
+    assert_eq!(said(&t, mark, "Directions"), ["Directions: the answer lists the first 200 of the route's 201 steps"]);
+    let mark = t.notice_mark();
+    t.run("map.route", &json!({"answer": route(200), "zoom": false, "addLayer": false})).unwrap();
+    assert!(said(&t, mark, "Directions").is_empty());
+    // A report on a layer of 65 fields: the first 64 filled in, and said.
+    let header: Vec<String> = (0..65).map(|i| format!("f{i}")).collect();
+    let csv = format!("lon,lat,{}\n10,45,{}\n", header.join(","), vec!["1"; 65].join(","));
+    use base64::Engine as _;
+    s.run("layer.addDataBytes", &json!({"fileName": "wide.csv", "data": base64::engine::general_purpose::STANDARD.encode(csv)})).unwrap();
+    s.run("report.new", &json!({"layer": "wide", "name": "Wide", "fields": ["f0"]})).unwrap();
+    let mark = s.notice_mark();
+    let r = s.run("report.autofill", &json!({"report": "Wide"})).unwrap();
+    assert_eq!(r["fields"].as_array().map(Vec::len), Some(64));
+    let n = s.map().layer_by_name("wide").unwrap().dataset.fields.len();
+    assert_eq!(said(&s, mark, "fields are filled in"), [format!("Wide: the first 64 of the layer's {n} fields are filled in")]);
+    // A bookmarks file: what isn't taken is said, one notice a kind with its count.
+    let place = |name: String| json!({"name": name, "lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0});
+    let mut long_description = place("Described".into());
+    long_description["description"] = json!("é".repeat(2001));
+    let file = json!({"bookmarks": [
+        place("Plain".into()),
+        json!({"lon": 10.0, "lat": 45.0, "metresPerPixel": 10.0}),
+        json!({"name": "Nowhere", "lon": 10.0, "lat": 95.0, "metresPerPixel": 10.0}),
+        json!({"name": "Unplaced"}),
+        place("é".repeat(121)),
+        long_description,
+    ]});
+    let mark = s.notice_mark();
+    let r = s.run("bookmark.import", &json!({"text": file.to_string()})).unwrap();
+    assert_eq!(r["added"].as_array().map(Vec::len), Some(3), "{r}");
+    let mut notes = said(&s, mark, "Import Bookmarks");
+    notes.sort();
+    assert_eq!(
+        notes,
+        [
+            "Import Bookmarks: 1 bookmark(s) with a description cut to 2000 characters",
+            "Import Bookmarks: 1 bookmark(s) with a name cut to 120 characters",
+            "Import Bookmarks: 1 bookmark(s) without a name left out",
+            "Import Bookmarks: 2 bookmark(s) without a place this map can show left out",
+        ]
+    );
+    // A clean file says nothing.
+    let mark = s.notice_mark();
+    s.run("bookmark.import", &json!({"text": json!({"bookmarks": [place("Again".into())]}).to_string()})).unwrap();
+    assert!(said(&s, mark, "Import Bookmarks").is_empty());
+}
