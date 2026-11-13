@@ -44410,16 +44410,38 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
         outputs: Vec::new(),
     };
     let history = |s: &Session, mark: u64| {
-        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("in the history")).collect::<Vec<_>>()
+        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("the history")).collect::<Vec<_>>()
     };
     let mut g = world();
-    // 260 runs, ten of them failed: a task replays the 250 that succeeded.
-    g.project.gp_history = (0..260).map(|i| crate::GpRecord { ok: i % 26 != 25, ..run(i) }).collect();
+    // 265 runs, ten of them failed and five with a tool that isn't available: a task replays
+    // the 250 it can, and says both what it leaves out and where it cuts.
+    let mystery = |i: usize| i % 53 == 7;
+    g.project.gp_history = (0..265)
+        .map(|i| {
+            let r = crate::GpRecord { ok: i % 26 != 25, ..run(i) };
+            if mystery(i) { crate::GpRecord { tool: "Mystery".into(), id: "mystery".into(), ..r } } else { r }
+        })
+        .collect();
+    assert_eq!((g.project.gp_history.iter().filter(|r| r.ok).count(), (0..265).filter(|&i| mystery(i)).count()), (255, 5));
     let mark = g.notice_mark();
     g.run("task.new", &json!({"name": "Replay", "fromHistory": true})).unwrap();
     let replay = g.project.tasks.iter().find(|t| t.name == "Replay").unwrap();
     assert_eq!(replay.steps.len(), 200);
-    assert_eq!(history(&g, mark), ["Replay: the task takes the first 200 of the 250 successful runs in the history"]);
+    // The first 200 it can replay, in their order: run 7 is left out, so the 8th step is run 8.
+    assert_eq!(replay.steps[7].instructions, "run 8");
+    assert_eq!(
+        history(&g, mark),
+        [
+            "Replay: 5 successful runs in the history use a tool that isn't available, so they're left out",
+            "Replay: the task takes the first 200 of the 250 successful runs it can replay from the history",
+        ]
+    );
+    // One run it can't replay, within the limit: said in the singular, and nothing is cut.
+    g.project.gp_history = (0..3).map(|i| if i == 1 { crate::GpRecord { tool: "Mystery".into(), ..run(i) } } else { run(i) }).collect();
+    let mark = g.notice_mark();
+    g.run("task.new", &json!({"name": "Few", "fromHistory": true})).unwrap();
+    assert_eq!(g.project.tasks.iter().find(|t| t.name == "Few").map(|t| t.steps.len()), Some(2));
+    assert_eq!(history(&g, mark), ["Few: 1 successful run in the history uses a tool that isn't available, so it's left out"]);
     g.project.gp_history = (0..200).map(run).collect();
     let mark = g.notice_mark();
     g.run("task.new", &json!({"name": "Short", "fromHistory": true})).unwrap();

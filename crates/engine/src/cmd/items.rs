@@ -249,6 +249,8 @@ pub fn commands() -> Vec<C> {
             let name = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Task");
             let name = super::within("name", "a task's name", name, 200)?;
             let description = super::within("description", "a task's description", ps(p, "description").unwrap_or(""), 2000)?;
+            // The successful runs in the history left out for a tool that isn't available.
+            let mut unavailable = 0;
             let steps: Vec<TaskStep> = match p.get("steps") {
                 Some(v) => {
                     let steps: Vec<TaskStep> = serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?;
@@ -256,16 +258,16 @@ pub fn commands() -> Vec<C> {
                     steps
                 }
                 // A task can replay the geoprocessing history, one step per successful run.
-                None if b(p, "fromHistory").unwrap_or(false) => s
-                    .project
-                    .gp_history
-                    .iter()
-                    .filter(|r| r.ok)
-                    .filter_map(|r| {
-                        let tool = super::gp::tool_id(&r.tool)?;
-                        Some(TaskStep { title: r.tool.clone(), instructions: r.messages.first().cloned().unwrap_or_default(), command: "gp.run".into(), params: json!({"tool": tool, "params": r.params}) })
-                    })
-                    .collect(),
+                None if b(p, "fromHistory").unwrap_or(false) => {
+                    let mut steps = Vec::new();
+                    for r in s.project.gp_history.iter().filter(|r| r.ok) {
+                        match super::gp::tool_id(&r.tool) {
+                            Some(tool) => steps.push(TaskStep { title: r.tool.clone(), instructions: r.messages.first().cloned().unwrap_or_default(), command: "gp.run".into(), params: json!({"tool": tool, "params": r.params}) }),
+                            None => unavailable += 1,
+                        }
+                    }
+                    steps
+                }
                 None => Vec::new(),
             };
             for st in &steps {
@@ -273,10 +275,19 @@ pub fn commands() -> Vec<C> {
                     return Err(format!("step '{}' runs an unknown command '{}'", st.title, st.command));
                 }
             }
-            // A task from a history longer than a task takes keeps its first runs, and says so.
+            // A task from the history leaves out the runs it can't replay, and keeps its first
+            // runs when there are more than a task takes; each is said, with its count.
+            if unavailable > 0 {
+                let said = if unavailable == 1 {
+                    "1 successful run in the history uses a tool that isn't available, so it's left out".to_string()
+                } else {
+                    format!("{unavailable} successful runs in the history use a tool that isn't available, so they're left out")
+                };
+                s.notify(format!("{name}: {said}"), false);
+            }
             let mut steps = steps;
             if steps.len() > MAX_TASK_STEPS {
-                s.notify(format!("{name}: the task takes the first {MAX_TASK_STEPS} of the {} successful runs in the history", steps.len()), false);
+                s.notify(format!("{name}: the task takes the first {MAX_TASK_STEPS} of the {} successful runs it can replay from the history", steps.len()), false);
                 steps.truncate(MAX_TASK_STEPS);
             }
             let mut name = name;
