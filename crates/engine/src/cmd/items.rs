@@ -276,7 +276,7 @@ pub fn commands() -> Vec<C> {
             // A task from a history longer than a task takes keeps its first runs, and says so.
             let mut steps = steps;
             if steps.len() > MAX_TASK_STEPS {
-                s.notify(format!("{name}: the task takes the first {MAX_TASK_STEPS} of the history's {} runs", steps.len()), false);
+                s.notify(format!("{name}: the task takes the first {MAX_TASK_STEPS} of the {} successful runs in the history", steps.len()), false);
                 steps.truncate(MAX_TASK_STEPS);
             }
             let mut name = name;
@@ -285,9 +285,13 @@ pub fn commands() -> Vec<C> {
             while s.project.tasks.iter().any(|t| t.name.eq_ignore_ascii_case(&name)) {
                 i += 1;
                 // The suffix that tells it apart fits within the name's 200 characters: the name
-                // given gives way to it, and the answer gives the name kept.
+                // given gives way to it, and that is said.
                 let suffix = format!(" {i}");
                 name = base.chars().take(200 - suffix.chars().count()).chain(suffix.chars()).collect();
+            }
+            let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
+            if kept < base.chars().count() {
+                s.notify(format!("New Task: a task has that name already, so the name given is cut to {kept} characters to fit \" {i}\""), false);
             }
             s.project.tasks.push(Task { name: name.clone(), description, steps });
             Ok(json!({"task": name}))

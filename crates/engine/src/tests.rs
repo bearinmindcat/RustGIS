@@ -44340,9 +44340,17 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     assert!(s.project.tasks.is_empty(), "no task added");
     s.run("task.new", &json!({"name": "Lesson", "description": at(2000), "steps": vec![step.clone(); 200]})).unwrap();
     // A name at the limit, given three times: each told apart by a suffix within the 200.
-    for _ in 0..3 {
+    let cut = |s: &Session, mark: u64| s.notices_since(mark).iter().filter(|n| n.text.contains("a task has that name already")).count();
+    for k in 0..3 {
+        let mark = s.notice_mark();
         s.run("task.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap();
+        // The first is taken whole; the others give way to their suffix, and say so.
+        assert_eq!(cut(&s, mark), usize::from(k > 0), "task {k}");
     }
+    // A short name told apart by its suffix isn't cut, and nothing is said.
+    let mark = s.notice_mark();
+    s.run("task.new", &json!({"name": "Lesson", "steps": [step.clone()]})).unwrap();
+    assert_eq!(cut(&s, mark), 0);
     let long: Vec<&str> = s.project.tasks.iter().map(|t| t.name.as_str()).filter(|n| n.starts_with('é')).collect();
     assert_eq!(long.len(), 3, "{long:?}");
     assert!(long.iter().all(|n| n.chars().count() <= 200), "{:?}", long.iter().map(|n| n.chars().count()).collect::<Vec<_>>());
@@ -44402,16 +44410,17 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
         outputs: Vec::new(),
     };
     let history = |s: &Session, mark: u64| {
-        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("history's")).collect::<Vec<_>>()
+        s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("in the history")).collect::<Vec<_>>()
     };
     let mut g = world();
-    g.project.gp_history = (0..250).map(run).collect();
+    // 260 runs, ten of them failed: a task replays the 250 that succeeded.
+    g.project.gp_history = (0..260).map(|i| crate::GpRecord { ok: i % 26 != 25, ..run(i) }).collect();
     let mark = g.notice_mark();
     g.run("task.new", &json!({"name": "Replay", "fromHistory": true})).unwrap();
     let replay = g.project.tasks.iter().find(|t| t.name == "Replay").unwrap();
-    assert_eq!((replay.steps.len(), replay.steps[199].instructions.as_str()), (200, "run 199"));
-    assert_eq!(history(&g, mark), ["Replay: the task takes the first 200 of the history's 250 runs"]);
-    g.project.gp_history.truncate(200);
+    assert_eq!(replay.steps.len(), 200);
+    assert_eq!(history(&g, mark), ["Replay: the task takes the first 200 of the 250 successful runs in the history"]);
+    g.project.gp_history = (0..200).map(run).collect();
     let mark = g.notice_mark();
     g.run("task.new", &json!({"name": "Short", "fromHistory": true})).unwrap();
     assert_eq!(g.project.tasks.iter().find(|t| t.name == "Short").map(|t| t.steps.len()), Some(200));
