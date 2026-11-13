@@ -651,8 +651,9 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     let n = steps.len();
     s.project.models.push(Model { name: name.clone(), steps, graph });
     notify_graph_dropped(s, dropped);
+    // An import says its own notice for a name it changed (`model.import`), so this is said once.
     let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
-    if kept < length {
+    if kept < length && !b(p, "imported").unwrap_or(false) {
         s.notify(
             format!("ModelBuilder: a model has that name already, so the name given is cut to {kept} characters to fit \" {i}\""),
             false,
