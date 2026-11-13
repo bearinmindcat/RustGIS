@@ -11095,6 +11095,79 @@ fn analysis_workflows_models_scripts_and_raster_functions() {
     assert!(g.as_array().unwrap().iter().any(|t| t["id"] == "raster.function"));
 }
 
+/// `model.new` refuses steps or a name given past their limits, rather than cutting them; from
+/// the history, it says the runs it can't replay and a history longer than a model takes.
+#[test]
+fn model_new_refuses_or_says_what_it_leaves() {
+    let mut s = world();
+    let said = |s: &Session, mark: u64, what: &str| {
+        s.notices_since(mark).iter().filter(|n| n.text.contains(what)).map(|n| n.text.clone()).collect::<Vec<_>>()
+    };
+    let step = json!({"tool": "buffer", "params": {"input": "Cities", "distance": 1}});
+    // Steps given: refused past 2,000, nothing added; taken at 2,000.
+    let models = s.project.models.len();
+    let e = s.run("model.new", &json!({"name": "Long", "steps": vec![step.clone(); 2001]})).unwrap_err();
+    assert!(e.contains("steps has 2001 entries") && e.contains("at most 2000"), "{e}");
+    assert_eq!(s.project.models.len(), models);
+    let r = s.run("model.new", &json!({"name": "Long", "steps": vec![step.clone(); 2000]})).unwrap();
+    assert_eq!(r["steps"], 2000);
+    // A name given: refused past 200 characters (é: two bytes, one character), taken at 200. The
+    // same name again is told apart within the 200, and that is said.
+    let at = |n: usize| "é".repeat(n);
+    let e = s.run("model.new", &json!({"name": at(201), "steps": [step.clone()]})).unwrap_err();
+    assert!(e.contains("201 characters") && e.contains("at most 200"), "{e}");
+    assert_eq!(s.project.models.len(), models + 1);
+    assert_eq!(s.run("model.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap()["model"], at(200));
+    let mark = s.notice_mark();
+    let r = s.run("model.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap();
+    assert_eq!(r["model"].as_str().map(|n| (n.chars().count(), n.ends_with(" 2"))), Some((200, true)), "{r}");
+    assert_eq!(
+        said(&s, mark, "ModelBuilder"),
+        ["ModelBuilder: a model has that name already, so the name given is cut to 198 characters to fit \" 2\""]
+    );
+    let mark = s.notice_mark();
+    s.run("model.new", &json!({"name": "Long", "steps": [step.clone()]})).unwrap();
+    assert!(said(&s, mark, "ModelBuilder").is_empty(), "a short name only gains the suffix");
+    // From the history: 2,006 runs, five with a tool that isn't available. The model replays the
+    // first 2,000 of the 2,001 it can, in their order, and says both.
+    let run = |i: usize| crate::GpRecord {
+        tool: "Buffer".into(),
+        id: "buffer".into(),
+        params: json!({"input": "Cities", "distance": i}),
+        command: None,
+        at: 0,
+        ok: true,
+        messages: Vec::new(),
+        millis: 0,
+        outputs: Vec::new(),
+    };
+    let mystery = |i: usize| crate::GpRecord { tool: "Mystery".into(), id: "mystery".into(), ..run(i) };
+    let history = |s: &Session, mark: u64| said(s, mark, "the history");
+    s.project.gp_history = (0..2006).map(|i| if i % 400 == 7 { mystery(i) } else { run(i) }).collect();
+    let mark = s.notice_mark();
+    let r = s.run("model.new", &json!({"name": "Replay", "fromHistory": true})).unwrap();
+    assert_eq!(r["steps"], 2000);
+    let replay = s.project.models.iter().find(|m| m.name == "Replay").unwrap();
+    assert_eq!(replay.steps[7].params["distance"], 8, "run 7 is left out");
+    assert_eq!(
+        history(&s, mark),
+        [
+            "Replay: 5 successful runs in the history use a tool that isn't available, so they're left out",
+            "Replay: the model takes the first 2000 of the 2001 successful runs it can replay from the history",
+        ]
+    );
+    // One it can't replay, within the limit: said in the singular, nothing cut.
+    s.project.gp_history = (0..3).map(|i| if i == 1 { mystery(i) } else { run(i) }).collect();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("model.new", &json!({"name": "Few", "fromHistory": true})).unwrap()["steps"], 2);
+    assert_eq!(history(&s, mark), ["Few: 1 successful run in the history uses a tool that isn't available, so it's left out"]);
+    // A clean history of 2,000 runs: all replayed, nothing said.
+    s.project.gp_history = (0..2000).map(run).collect();
+    let mark = s.notice_mark();
+    assert_eq!(s.run("model.new", &json!({"name": "Clean", "fromHistory": true})).unwrap()["steps"], 2000);
+    assert!(history(&s, mark).is_empty());
+}
+
 /// A 100 × 80 scan whose value is `ramp(col, row)` (so a bilinear warp reproduces it exactly), with
 /// a bright pixel at (50, 40), added as a layer with a placeholder position.
 fn scan_layer(s: &mut Session, name: &str) -> (fn(f64, f64) -> f32, (f64, f64)) {

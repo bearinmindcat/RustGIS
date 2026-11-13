@@ -560,19 +560,40 @@ fn note_passed_graph(s: &mut Session, p: &Value) {
     }
 }
 
+/// The most characters a model's name takes.
+const MAX_MODEL_NAME: usize = 200;
+
 fn new_model(s: &mut Session, p: &Value) -> CmdResult {
-    let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Model").chars().take(200).collect::<String>();
+    // A name given past its limit is refused, not cut.
+    let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Model").to_string();
+    let length = base.chars().count();
+    if length > MAX_MODEL_NAME {
+        return Err(format!("name is {length} characters: a model's name takes at most {MAX_MODEL_NAME}"));
+    }
     let (graph, dropped) = read_graph(p)?;
+    // From the history: the successful runs left out for a tool that isn't available.
+    let (mut from_history, mut unavailable) = (false, 0usize);
     let steps: Vec<ModelStep> = match p.get("steps") {
         _ if graph.is_some() => graph.as_ref().map(crate::model::graph_to_steps).unwrap_or_default(),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?,
+        // Steps given past a model's limit are refused, not cut.
+        Some(v) => {
+            let steps: Vec<ModelStep> = serde_json::from_value(v.clone()).map_err(|e| format!("steps: {e}"))?;
+            if steps.len() > crate::model::MAX_NODES {
+                return Err(format!("steps has {} entries: a model takes at most {}", steps.len(), crate::model::MAX_NODES));
+            }
+            steps
+        }
         None if b(p, "fromHistory").unwrap_or(false) => {
+            from_history = true;
             // Each successful run becomes a step; inputs naming an earlier run's output become
             // references to it, so the model re-runs as a chain.
             let mut steps: Vec<ModelStep> = Vec::new();
             let mut outputs: Vec<Vec<String>> = Vec::new();
             for r in s.project.gp_history.iter().filter(|r| r.ok) {
-                let Some(tool) = super::gp::tool_id(&r.tool) else { continue };
+                let Some(tool) = super::gp::tool_id(&r.tool) else {
+                    unavailable += 1;
+                    continue;
+                };
                 let mut params = r.params.clone();
                 // Only layer parameters can name an earlier output.
                 let spec = rustgis_analysis::resolve_published(tool).map(|r| r.spec());
@@ -605,8 +626,11 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
         }
         None => Vec::new(),
     };
-    // A graph may name tools not installed here (its problems say so); steps may not.
+    // A history longer than a model takes keeps its first runs; that is said below. A graph's
+    // steps are within the limit already (read_graph refuses a larger graph).
+    let replayable = steps.len();
     let steps: Vec<ModelStep> = steps.into_iter().take(crate::model::MAX_NODES).collect();
+    // A graph may name tools not installed here (its problems say so); steps may not.
     if graph.is_none() {
         for st in &steps {
             if super::gp::tool_id(&st.tool).is_none() {
@@ -619,11 +643,36 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     let mut i = 1;
     while s.project.models.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
         i += 1;
-        name = format!("{base} {i}");
+        // The suffix that tells it apart fits within the name's limit: the name given gives way
+        // to it, and that is said.
+        let suffix = format!(" {i}");
+        name = base.chars().take(MAX_MODEL_NAME - suffix.chars().count()).chain(suffix.chars()).collect();
     }
     let n = steps.len();
     s.project.models.push(Model { name: name.clone(), steps, graph });
     notify_graph_dropped(s, dropped);
+    let kept = name.chars().count() - if i > 1 { format!(" {i}").chars().count() } else { 0 };
+    if kept < length {
+        s.notify(
+            format!("ModelBuilder: a model has that name already, so the name given is cut to {kept} characters to fit \" {i}\""),
+            false,
+        );
+    }
+    // From the history: what it can't replay, and where it cuts, each said with its count.
+    if unavailable > 0 {
+        let said = if unavailable == 1 {
+            "1 successful run in the history uses a tool that isn't available, so it's left out".to_string()
+        } else {
+            format!("{unavailable} successful runs in the history use a tool that isn't available, so they're left out")
+        };
+        s.notify(format!("{name}: {said}"), false);
+    }
+    if from_history && replayable > n {
+        s.notify(
+            format!("{name}: the model takes the first {n} of the {replayable} successful runs it can replay from the history"),
+            false,
+        );
+    }
     Ok(json!({"model": name, "steps": n}))
 }
 
