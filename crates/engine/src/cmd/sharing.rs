@@ -268,18 +268,26 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
             Ok((m.name.clone(), scene.bytes, m.name.clone()))
         }
         "linkChart" => {
-            let rel = ps(p, "relationship").map(str::to_string);
-            let (html, left) = link_chart(s, rel.as_deref())?;
-            // Every relationship is recorded with an empty source (a relationship may be called
-            // "Relationships").
-            let name = rel.clone().unwrap_or_else(|| "Relationships".into());
-            if let Some(left) = left {
-                s.notify(format!("{name}: {left}"), false);
+            let (item, note) = link_chart_item(s, p)?;
+            if let Some(note) = note {
+                s.notify(note, false);
             }
-            Ok((name, html.into_bytes(), rel.unwrap_or_default()))
+            Ok(item)
         }
         k => Err(format!("unknown share '{k}'")),
     }
+}
+
+/// A link chart's shared item, and what its limits leave out when they do (#1947), for whoever
+/// shares it to say: `share` says it last, after "Shared …", so the status bar keeps it.
+fn link_chart_item(s: &Session, p: &Value) -> Result<((String, Vec<u8>, String), Option<String>), String> {
+    let rel = ps(p, "relationship").map(str::to_string);
+    let (html, left) = link_chart(s, rel.as_deref())?;
+    // Every relationship is recorded with an empty source (a relationship may be called
+    // "Relationships").
+    let name = rel.clone().unwrap_or_else(|| "Relationships".into());
+    let note = left.map(|left| format!("{name}: {left}"));
+    Ok(((name, html.into_bytes(), rel.unwrap_or_default()), note))
 }
 
 /// A map to share, its layer groups folded into their layers (the shared formats have none).
@@ -324,7 +332,7 @@ fn target(input: &impl super::InputSource, p: &Value, name: &str, ext: &str) -> 
 }
 
 fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
-    let (name, bytes, source) = share_bytes(s, kind, p)?;
+    let ((name, bytes, source), chart_note) = if kind == "linkChart" { link_chart_item(s, p)? } else { (share_bytes(s, kind, p)?, None) };
     let ext = KINDS.iter().find(|k| k.0 == kind).map_or("bin", |k| k.1);
     let path = target(s, p, &name, ext)?;
     // A share of another kind (or an uploaded file) at that path isn't replaced.
@@ -362,6 +370,10 @@ fn share(s: &mut Session, p: &Value, kind: &str) -> CmdResult {
     // After it, so the status bar, which shows the last notice, keeps saying it.
     note_label_classes(s, kind, p);
     note_export(s, kind, p, &path);
+    // What a link chart's limits leave out, last of all, so the status bar shows it.
+    if let Some(note) = chart_note {
+        s.notify(note, false);
+    }
     Ok(json!({"item": id, "path": path, "bytes": bytes.len()}))
 }
 
@@ -1305,7 +1317,7 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>)
     // What the chart would show without its limits, to say what they leave out: each related
     // feature once, and each relation.
     let mut related: HashSet<(usize, u32, usize)> = HashSet::new();
-    let mut relations = 0usize;
+    let mut relations = 0u64;
     for (gi, r) in rels.iter().enumerate() {
         let (Some((om, o)), Some((dm, d))) = (find(&r.origin), find(&r.destination)) else { continue };
         let (Some(ok), Some(dk)) = (o.dataset.field_index(&r.origin_key), d.dataset.field_index(&r.destination_key)) else { continue };
@@ -1329,7 +1341,8 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>)
             let Some(key) = key_of(&o.dataset, orow, ok) else { continue };
             let Some(drows) = by_key.get(&key) else { continue };
             related.insert((om, o.id, orow));
-            relations += drows.len();
+            // Counted in 64 bits: relations can pass `usize` in the browser (32 bits).
+            relations += drows.len() as u64;
             if counted.insert(key) {
                 related.extend(drows.iter().map(|&drow| (dm, d.id, drow)));
             }
@@ -1350,7 +1363,7 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>)
     if links.is_empty() {
         return Err("no features are related through those relationships".into());
     }
-    let left = (nodes.len() < related.len() || links.len() < relations)
+    let left = (nodes.len() < related.len() || (links.len() as u64) < relations)
         .then(|| format!("{} of the {} related features and {} of the {} links", nodes.len(), related.len(), links.len(), relations));
     let title = rel.unwrap_or("Relationships");
     let mut legend = String::new();

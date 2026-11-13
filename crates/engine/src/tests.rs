@@ -11233,6 +11233,8 @@ fn a_link_chart_says_what_its_limits_leave_out() {
     let shows = "201 of the 251 related features and 200 of the 250 links";
     assert_eq!(said(&s, mark, "Fan"), [format!("Fan: the link chart shows {shows}; {limits}")]);
     assert!(html.contains(&format!("Shows {shows}.")), "the page says it too");
+    // Said last, after "Shared …", so the status bar, which shows the last notice, keeps it.
+    assert!(s.notices.last().is_some_and(|n| n.text.starts_with("Fan: the link chart shows")), "{:?}", s.notices.last());
     // 3,001 pairs: the chart's 3,000 features are the first 1,500 pairs.
     let keys: Vec<String> = (0..3001).map(|i| format!("p{i}")).collect();
     add(&mut s, "pair_a.csv", &keys);
@@ -11262,6 +11264,22 @@ fn a_link_chart_says_what_its_limits_leave_out() {
     let (links, nodes, html) = drawn("Full");
     assert_eq!((links, nodes), (200, 201));
     assert!(said(&s, mark, "Full").is_empty() && !html.contains("Shows "));
+    // 101 features each related to the same 200: 20,200 links, each feature within its 200. The
+    // chart's 20,000 links are the first 100 features'; the 101st has no room.
+    add(&mut s, "mesh_one.csv", &vec!["m".to_string(); 101]);
+    add(&mut s, "mesh_many.csv", &vec!["m".to_string(); 200]);
+    s.run(
+        "data.relate",
+        &json!({"name": "Mesh", "origin": "mesh_one", "originKey": "key", "destination": "mesh_many", "destinationKey": "key"}),
+    )
+    .unwrap();
+    let mark = s.notice_mark();
+    s.run("share.linkChart", &json!({"relationship": "Mesh"})).unwrap();
+    let (links, nodes, html) = drawn("Mesh");
+    assert_eq!((links, nodes), (20_000, 300));
+    let shows = "300 of the 301 related features and 20000 of the 20200 links";
+    assert_eq!(said(&s, mark, "Mesh"), [format!("Mesh: the link chart shows {shows}; {limits}")]);
+    assert!(html.contains(&format!("Shows {shows}.")));
     let _ = std::fs::remove_dir_all(dir);
 }
 
