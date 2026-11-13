@@ -4,7 +4,7 @@
 //! and web tools. Each share is recorded as a shared item (Status › Jobs) that the Manage
 //! commands update in place, written to a path or a registered data store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,8 @@ const MAX_SCENE_BYTES: usize = 128 << 20;
 const MAX_NODES: usize = 3000;
 /// Most links in a link chart (its page lays them all out every frame).
 const MAX_LINKS: usize = 20_000;
+/// Most links a link chart draws from one feature.
+const MAX_FEATURE_LINKS: usize = 200;
 /// Most shared items and data stores kept.
 const MAX_ITEMS: usize = 1000;
 /// Largest file an upload copies.
@@ -267,10 +269,13 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
         }
         "linkChart" => {
             let rel = ps(p, "relationship").map(str::to_string);
-            let html = link_chart(s, rel.as_deref())?;
+            let (html, left) = link_chart(s, rel.as_deref())?;
             // Every relationship is recorded with an empty source (a relationship may be called
             // "Relationships").
             let name = rel.clone().unwrap_or_else(|| "Relationships".into());
+            if let Some(left) = left {
+                s.notify(format!("{name}: {left}"), false);
+            }
             Ok((name, html.into_bytes(), rel.unwrap_or_default()))
         }
         k => Err(format!("unknown share '{k}'")),
@@ -1267,7 +1272,9 @@ fn viewpoint(m: &Map, at: &rustgis_map::Camera, view: (f64, f64)) -> (Value, Val
 
 /// A link chart: the features joined by the map's relationships, as a node-link diagram (a
 /// self-contained page with a force layout; drag nodes, hover for names).
-fn link_chart(s: &Session, rel: Option<&str>) -> Result<String, String> {
+/// The page, and what the chart's limits leave out of it when they do: said by whoever shares
+/// it, and on the page (#1947).
+fn link_chart(s: &Session, rel: Option<&str>) -> Result<(String, Option<String>), String> {
     let rels = link_relationships(s, rel)?;
     let find = |name: &str| link_layer(s, name).and_then(|(m, l)| s.project.maps.iter().position(|p| std::ptr::eq(p, m)).map(|i| (i, l)));
     let mut nodes: Vec<Value> = Vec::new();
@@ -1283,10 +1290,23 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<String, String> {
             .or_else(|| ds.fields.iter().position(|f| !f.ty.is_numeric()));
         fi.map(|i| ds.value(row, i).to_string()).unwrap_or_else(|| format!("{} {}", l.name, row + 1))
     };
-    'rels: for (gi, r) in rels.iter().enumerate() {
-        if nodes.len() >= MAX_NODES {
-            break;
+    // A feature's node, made while the chart has room for one.
+    let node = |index: &mut HashMap<(usize, u32, usize), usize>, nodes: &mut Vec<Value>, mi: usize, l: &Layer, row: usize, gi: usize| {
+        if let Some(&i) = index.get(&(mi, l.id, row)) {
+            return Some(i);
         }
+        if nodes.len() >= MAX_NODES {
+            return None;
+        }
+        nodes.push(json!({"name": label(l, row), "layer": l.name, "group": gi}));
+        index.insert((mi, l.id, row), nodes.len() - 1);
+        Some(nodes.len() - 1)
+    };
+    // What the chart would show without its limits, to say what they leave out: each related
+    // feature once, and each relation.
+    let mut related: HashSet<(usize, u32, usize)> = HashSet::new();
+    let mut relations = 0usize;
+    for (gi, r) in rels.iter().enumerate() {
         let (Some((om, o)), Some((dm, d))) = (find(&r.origin), find(&r.destination)) else { continue };
         let (Some(ok), Some(dk)) = (o.dataset.field_index(&r.origin_key), d.dataset.field_index(&r.destination_key)) else { continue };
         let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1303,24 +1323,26 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<String, String> {
                 by_key.entry(v).or_default().push(row);
             }
         }
+        // The features a key relates to are counted once, however many features share it.
+        let mut counted: HashSet<String> = HashSet::new();
         for orow in 0..o.dataset.features.len() {
             let Some(key) = key_of(&o.dataset, orow, ok) else { continue };
             let Some(drows) = by_key.get(&key) else { continue };
-            if nodes.len() >= MAX_NODES {
-                break 'rels;
+            related.insert((om, o.id, orow));
+            relations += drows.len();
+            if counted.insert(key) {
+                related.extend(drows.iter().map(|&drow| (dm, d.id, drow)));
             }
-            let mut node = |mi: usize, l: &Layer, row: usize, nodes: &mut Vec<Value>| -> usize {
-                *index.entry((mi, l.id, row)).or_insert_with(|| {
-                    nodes.push(json!({"name": label(l, row), "layer": l.name, "group": gi}));
-                    nodes.len() - 1
-                })
-            };
-            let a = node(om, o, orow, &mut nodes);
-            for &drow in drows.iter().take(200) {
-                if nodes.len() >= MAX_NODES || links.len() >= MAX_LINKS {
-                    break 'rels;
+            if links.len() >= MAX_LINKS {
+                continue;
+            }
+            let Some(a) = node(&mut index, &mut nodes, om, o, orow, gi) else { continue };
+            for &drow in drows.iter().take(MAX_FEATURE_LINKS) {
+                if links.len() >= MAX_LINKS {
+                    break;
                 }
-                let b = node(dm, d, drow, &mut nodes);
+                // A feature the chart has no room for: one already in it may still be linked.
+                let Some(b) = node(&mut index, &mut nodes, dm, d, drow, gi) else { continue };
                 links.push(json!({"source": a, "target": b, "relationship": r.name}));
             }
         }
@@ -1328,6 +1350,8 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<String, String> {
     if links.is_empty() {
         return Err("no features are related through those relationships".into());
     }
+    let left = (nodes.len() < related.len() || links.len() < relations)
+        .then(|| format!("{} of the {} related features and {} of the {} links", nodes.len(), related.len(), links.len(), relations));
     let title = rel.unwrap_or("Relationships");
     let mut legend = String::new();
     let layers: Vec<String> = {
@@ -1339,7 +1363,11 @@ fn link_chart(s: &Session, rel: Option<&str>) -> Result<String, String> {
     for (i, l) in layers.iter().enumerate() {
         let _ = write!(legend, "<span><i style=\"background:hsl({},60%,50%)\"></i>{}</span>", i * 137 % 360, html_escape(l));
     }
-    Ok(format!(
+    // Whoever opens the page sees that it shows part of what's related.
+    if let Some(left) = &left {
+        let _ = write!(legend, "<br><small>Shows {}.</small>", html_escape(left));
+    }
+    let html = format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>
 <style>html,body{{margin:0;height:100%;font-family:system-ui,sans-serif;background:#fafbfc}}svg{{width:100%;height:100%}}line{{stroke:#9aa5b1;stroke-opacity:.6}}circle{{stroke:#fff;stroke-width:1.5;cursor:grab}}
 #k{{position:fixed;left:8px;top:8px;background:#fffe;padding:6px 10px;border-radius:6px;font-size:13px;box-shadow:0 1px 4px #0002}}#k span{{margin-right:10px}}#k i{{display:inline-block;width:10px;height:10px;border-radius:5px;margin-right:4px}}</style></head>
@@ -1366,7 +1394,13 @@ const moving=N.reduce((m,a)=>Math.max(m,Math.abs(a.vx),Math.abs(a.vy)),0);if(mov
         nodes = script_json(&Value::Array(nodes)),
         links = script_json(&Value::Array(links)),
         layers = script_json(&json!(layers)),
-    ))
+    );
+    let said = left.map(|left| {
+        format!(
+            "the link chart shows {left}; a link chart takes at most {MAX_NODES} features, {MAX_LINKS} links and {MAX_FEATURE_LINKS} links from one feature"
+        )
+    });
+    Ok((html, said))
 }
 
 /// Resolves saved/default and literal locator paths without reading their contents.
