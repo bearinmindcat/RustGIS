@@ -588,7 +588,8 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     // From the history: the successful runs left out for a tool that isn't available, and the
     // steps that read a layer one of them made.
     let (mut from_history, mut unavailable, mut unmade_at) = (false, 0usize, Vec::<usize>::new());
-    let steps: Vec<ModelStep> = match p.get("steps") {
+    // A null steps is none given, as the check for more than one way above takes it.
+    let steps: Vec<ModelStep> = match p.get("steps").filter(|v| !v.is_null()) {
         _ if graph.is_some() => graph.as_ref().map(crate::model::graph_to_steps).unwrap_or_default(),
         // Steps given past a model's limit are refused, not cut.
         Some(v) => {

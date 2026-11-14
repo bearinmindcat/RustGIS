@@ -11214,13 +11214,15 @@ fn model_new_refuses_or_says_what_it_leaves() {
     assert!(e.contains("not more than one"), "{e}");
     let e = s.run("model.new", &json!({"name": "Both", "graph": graph, "fromHistory": true})).unwrap_err();
     assert!(e.contains("not more than one"), "{e}");
+    let e = s.run("model.new", &json!({"name": "Both", "steps": [step.clone()], "fromHistory": true})).unwrap_err();
+    assert!(e.contains("not more than one"), "{e}");
     assert_eq!(s.project.models.len(), models);
     // A name given: refused past 200 characters (é: two bytes, one character), taken at 200. The
     // same name again is told apart within the 200, and that is said.
     let at = |n: usize| "é".repeat(n);
     let e = s.run("model.new", &json!({"name": at(201), "steps": [step.clone()]})).unwrap_err();
     assert!(e.contains("201 characters") && e.contains("at most 200"), "{e}");
-    assert_eq!(s.project.models.len(), models + 1);
+    assert_eq!(s.project.models.len(), models);
     assert_eq!(s.run("model.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap()["model"], at(200));
     let mark = s.notice_mark();
     let r = s.run("model.new", &json!({"name": at(200), "steps": [step.clone()]})).unwrap();
@@ -11272,6 +11274,8 @@ fn model_new_refuses_or_says_what_it_leaves() {
     let mark = s.notice_mark();
     assert_eq!(s.run("model.new", &json!({"name": "Few", "fromHistory": true})).unwrap()["steps"], 2);
     assert_eq!(history(&s, mark), ["Few: 1 successful run in the history uses a tool that isn't available, so it's left out"]);
+    // A null steps is none given: the history is replayed.
+    assert_eq!(s.run("model.new", &json!({"name": "Few", "fromHistory": true, "steps": null})).unwrap()["steps"], 2);
     // A run left out that made a layer a later step reads: the step isn't wired to an older run's
     // output of that name, but reads the layer by its name, and that is said. Without the run left
     // out, the step is wired to the older run.

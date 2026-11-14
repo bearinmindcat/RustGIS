@@ -189,7 +189,12 @@ pub fn commands() -> Vec<C> {
             let said = s.notices_since(mark).iter().any(|n| n.text.starts_with("ModelBuilder: a model has that name already"));
             let cut_here = v["name"].as_str().is_some_and(|n| n.chars().count() > 200);
             if (cut_here || !said) && v.get("name").map_or(Some("Tool"), Value::as_str) != imported.get("model").and_then(Value::as_str) {
-                s.notify("1 model name was trimmed, shortened, replaced or made unique during import.", false);
+                // A cut to the 200 says how much it cut.
+                let text = match v["name"].as_str() {
+                    Some(n) if cut_here => format!("1 model name was cut from {} to 200 characters, a model name's limit, during import.", n.chars().count()),
+                    _ => "1 model name was trimmed, shortened, replaced or made unique during import.".to_string(),
+                };
+                s.notify(text, false);
             }
             Ok(imported)
         }).roles(&[crate::ParamRole { key: "text", role: crate::Role::Document(crate::Document::Model) }]).effects(crate::policy::Effects::NONE.with(crate::policy::Effect::Reserved).with(crate::policy::Effect::Files))

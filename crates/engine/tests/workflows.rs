@@ -291,6 +291,10 @@ fn model_import_reports_changed_names() {
         assert_ne!(Some(loaded.project.models[0].name.as_str()), name.as_str());
         assert_eq!(loaded.notices.len(), 1);
         assert!(!loaded.notices[0].error && loaded.notices[0].text.contains("1 model name"));
+        // A name past 200 characters says how much was cut.
+        if name.as_str().is_some_and(|n| n.chars().count() > 200) {
+            assert!(loaded.notices[0].text.contains("cut from 202 to 200 characters"), "{:?}", loaded.notices);
+        }
         assert_eq!(serde_json::to_value(loaded.project.models[0].graph.as_ref().unwrap()).unwrap(), file["graph"]);
     }
     // `model.new` called with `imported` itself (a script may) says the cut too.
@@ -320,7 +324,11 @@ fn model_import_reports_changed_names() {
     loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
     let texts: Vec<&str> = loaded.notices.iter().map(|n| n.text.as_str()).collect();
     assert_eq!(texts.len(), 2, "{texts:?}");
-    assert!(texts.iter().any(|t| t.contains("cut to 198 characters")) && texts.iter().any(|t| t.contains("1 model name")), "{texts:?}");
+    assert!(
+        texts.iter().any(|t| t.contains("cut to 198 characters"))
+            && texts.iter().any(|t| t.contains("1 model name was cut from 250 to 200 characters")),
+        "{texts:?}"
+    );
     file.as_object_mut().unwrap().remove("name");
     let mut loaded = Session::new(Project::new("Loaded"));
     loaded.run("model.import", &json!({"text": file.to_string()})).unwrap();
