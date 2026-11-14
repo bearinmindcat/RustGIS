@@ -11207,6 +11207,14 @@ fn model_new_refuses_or_says_what_it_leaves() {
     assert_eq!(s.project.models.len(), models);
     let r = s.run("model.new", &json!({"name": "Long", "steps": vec![step.clone(); 2000]})).unwrap();
     assert_eq!(r["steps"], 2000);
+    // A graph, steps or the history: one way to make a model. Two are refused, and nothing is added.
+    let graph = json!({"nodes": [{"id": "i", "kind": "input", "layer": "Cities"}], "edges": []});
+    let models = s.project.models.len();
+    let e = s.run("model.new", &json!({"name": "Both", "graph": graph, "steps": [step.clone()]})).unwrap_err();
+    assert!(e.contains("not more than one"), "{e}");
+    let e = s.run("model.new", &json!({"name": "Both", "graph": graph, "fromHistory": true})).unwrap_err();
+    assert!(e.contains("not more than one"), "{e}");
+    assert_eq!(s.project.models.len(), models);
     // A name given: refused past 200 characters (é: two bytes, one character), taken at 200. The
     // same name again is told apart within the 200, and that is said.
     let at = |n: usize| "é".repeat(n);
@@ -11224,6 +11232,13 @@ fn model_new_refuses_or_says_what_it_leaves() {
     let mark = s.notice_mark();
     s.run("model.new", &json!({"name": "Long", "steps": [step.clone()]})).unwrap();
     assert!(said(&s, mark, "ModelBuilder").is_empty(), "a short name only gains the suffix");
+    // A cut that lands on a space keeps no space before the suffix: the name's 197 letters, then " 2".
+    let spaced = format!("{} bc", "a".repeat(197));
+    s.run("model.new", &json!({"name": spaced, "steps": [step.clone()]})).unwrap();
+    let mark = s.notice_mark();
+    let r = s.run("model.new", &json!({"name": spaced, "steps": [step.clone()]})).unwrap();
+    assert_eq!(r["model"], format!("{} 2", "a".repeat(197)), "{r}");
+    assert_eq!(said(&s, mark, "ModelBuilder").len(), 1, "the cut to 197 is said");
     // From the history: 2,006 runs, five with a tool that isn't available. The model replays the
     // first 2,000 of the 2,001 it can, in their order, and says both.
     let run = |i: usize| crate::GpRecord {

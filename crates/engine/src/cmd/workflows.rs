@@ -2,6 +2,8 @@
 //! and the workflows (suitability, visibility, lines of sight, interpolation, network routes,
 //! neighbourhoods, simulation, data profiles, exploration, similarity and format conversion).
 
+use std::collections::HashMap;
+
 use rustgis_analysis::{network, rasterops};
 use rustgis_data::raster::{Crs, Raster};
 use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
@@ -565,12 +567,22 @@ fn note_passed_graph(s: &mut Session, p: &Value) {
 /// The most characters a model's name takes.
 const MAX_MODEL_NAME: usize = 200;
 
+/// Makes a model from a graph, steps or the run history. It stays on the UI thread (the Analyze
+/// pane's "New Model From History" calls it there) because no tool runs here: each history run is
+/// read once, so the work is linear in the history.
 fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     // A name given past its limit is refused, not cut.
     let base = ps(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Model").to_string();
     let length = base.chars().count();
     if length > MAX_MODEL_NAME {
         return Err(format!("name is {length} characters: a model's name takes at most {MAX_MODEL_NAME}"));
+    }
+    // A graph, steps or the history is one way to make a model: given two, the other would be
+    // dropped without a word, so that is refused.
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    let ways = usize::from(given("graph")) + usize::from(given("steps")) + usize::from(b(p, "fromHistory").unwrap_or(false));
+    if ways > 1 {
+        return Err("give a graph, steps or fromHistory, not more than one of them".into());
     }
     let (graph, dropped) = read_graph(p)?;
     // From the history: the successful runs left out for a tool that isn't available, and the
@@ -591,14 +603,16 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
             // Each successful run becomes a step; inputs naming an earlier run's output become
             // references to it, so the model re-runs as a chain.
             let mut steps: Vec<ModelStep> = Vec::new();
-            // Each run's outputs in the history's order, with its step when it's replayed: a run
-            // left out still made what it made, so a later step isn't wired to an older run's
+            // Each name holds the latest run that made it, with that run's step when it's replayed:
+            // a run left out still made what it made, so a later step isn't wired to an older run's
             // output of the same name.
-            let mut makers: Vec<(Option<usize>, &[String])> = Vec::new();
+            let mut made: HashMap<&str, Option<usize>> = HashMap::new();
             for r in s.project.gp_history.iter().filter(|r| r.ok) {
                 let Some(tool) = super::gp::tool_id(&r.tool) else {
                     unavailable += 1;
-                    makers.push((None, r.outputs.as_slice()));
+                    for name in r.outputs.iter() {
+                        made.insert(name.as_str(), None);
+                    }
                     continue;
                 };
                 let mut params = r.params.clone();
@@ -621,7 +635,7 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
                     for (key, v) in o.iter_mut() {
                         if let Some(t) = v.as_str().filter(|_| is_layer(key))
                             // The latest run that made that name (names can be reused).
-                            && let Some(&(made_by, _)) = makers.iter().rev().find(|(_, outs)| outs.iter().any(|x| x == t))
+                            && let Some(&made_by) = made.get(t)
                         {
                             match made_by {
                                 Some(k) => *v = json!(format!("%{}", k + 1)),
@@ -635,7 +649,9 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
                 if reads_unmade {
                     unmade_at.push(steps.len());
                 }
-                makers.push((Some(steps.len()), r.outputs.as_slice()));
+                for name in r.outputs.iter() {
+                    made.insert(name.as_str(), Some(steps.len()));
+                }
                 steps.push(ModelStep { tool: tool.to_string(), params });
             }
             steps
@@ -660,9 +676,10 @@ fn new_model(s: &mut Session, p: &Value) -> CmdResult {
     while s.project.models.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
         i += 1;
         // The suffix that tells it apart fits within the name's limit: the name given gives way
-        // to it, and that is said.
+        // to it, and that is said. A cut that lands on a space keeps no space before the suffix.
         let suffix = format!(" {i}");
-        name = base.chars().take(MAX_MODEL_NAME - suffix.chars().count()).chain(suffix.chars()).collect();
+        let head: String = base.chars().take(MAX_MODEL_NAME - suffix.chars().count()).collect();
+        name = format!("{}{suffix}", head.trim_end());
     }
     let n = steps.len();
     // Of the steps the model keeps.
