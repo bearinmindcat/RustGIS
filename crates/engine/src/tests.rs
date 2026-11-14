@@ -45392,6 +45392,28 @@ fn names_texts_and_lists_over_their_limit_are_refused_not_cut() {
     assert_eq!((g.name.clone(), rustgis_map::graphics::label(&g.dataset, 0).map(str::to_string)), (at(200), Some(at(2000))));
     // Restyled by layer and row, as `graphics.style` restyles the selected ones (the same code).
     refused(s.run("graphics.edit", &json!({"layer": graphics, "row": 0, "text": at(2001)})), "graphic edited", 2001, 2000);
+    // The same name again: the suffix that tells it apart fits within the 200, the name given
+    // gives way to it, and that is said. A short name only gains the suffix, and nothing is said.
+    let layer_cut = |s: &Session, mark: u64| {
+        s.notices_since(mark)
+            .iter()
+            .filter(|n| n.text.contains("a layer has that name already"))
+            .map(|n| n.text.clone())
+            .collect::<Vec<_>>()
+    };
+    let mark = s.notice_mark();
+    let again = s.run("graphics.newLayer", &json!({"name": at(200)})).unwrap()["layer"].as_u64().unwrap() as u32;
+    let stored = s.map().layer(again).unwrap().name.clone();
+    assert_eq!((stored.chars().count(), stored.ends_with(" (2)")), (200, true), "{stored}");
+    assert_eq!(
+        layer_cut(&s, mark),
+        ["Add Graphics Layer: a layer has that name already, so the name given is cut to 196 characters to fit \" (2)\""]
+    );
+    s.run("graphics.newLayer", &json!({"name": "Doodles"})).unwrap();
+    let mark = s.notice_mark();
+    let short = s.run("graphics.newLayer", &json!({"name": "Doodles"})).unwrap()["layer"].as_u64().unwrap() as u32;
+    assert_eq!(s.map().layer(short).unwrap().name, "Doodles (2)");
+    assert!(layer_cut(&s, mark).is_empty());
     // A task's name, description and steps, and a step's title and instructions.
     refused(s.run("task.new", &json!({"name": at(201)})), "task name", 201, 200);
     refused(s.run("task.new", &json!({"name": "T", "description": at(2001)})), "task description", 2001, 2000);

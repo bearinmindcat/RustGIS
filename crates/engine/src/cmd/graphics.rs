@@ -44,14 +44,23 @@ pub fn commands() -> Vec<C> {
     ]
 }
 
-/// Adds a graphics layer with a unique name and makes it active.
+/// Adds a graphics layer with a unique name and makes it active. The suffix that tells it apart
+/// fits within the name's 200 characters: the name given gives way to it, and that is said.
 fn new_layer(s: &mut Session, name: &str) -> u32 {
     let base: String = name.chars().take(200).collect();
     let mut name = base.clone();
     let mut i = 1;
     while s.map().layer_by_name(&name).is_some() {
         i += 1;
-        name = format!("{base} ({i})");
+        let suffix = format!(" ({i})");
+        name = base.chars().take(200 - suffix.chars().count()).chain(suffix.chars()).collect();
+    }
+    let kept = name.chars().count() - if i > 1 { format!(" ({i})").chars().count() } else { 0 };
+    if kept < base.chars().count() {
+        s.notify(
+            format!("Add Graphics Layer: a layer has that name already, so the name given is cut to {kept} characters to fit \" ({i})\""),
+            false,
+        );
     }
     let id = s.map_mut().add_graphics(&name);
     s.active_layer = Some(id);
