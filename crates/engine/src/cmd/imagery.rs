@@ -1198,6 +1198,8 @@ pub(crate) fn process_work(s: &Session, p: &Value) -> Result<super::workflows::W
         "clip" if p.get("polygon").is_some_and(|v| !v.is_null()) => {
             // Before the mask, which places the polygons on the raster's coordinates.
             r.require_coordinates()?;
+            // A name over the limit is refused before any feature is transformed.
+            let out = name(p, format!("{}_clip", r.name))?;
             let pl = clip_polygon(p).ok_or("polygon is a polygon layer's name")?;
             let l = s
                 .map()
@@ -1251,7 +1253,7 @@ pub(crate) fn process_work(s: &Session, p: &Value) -> Result<super::workflows::W
             if !failed_features.is_empty() {
                 log::warn!("{pl}: {} feature(s) failed polygon validation during clipping", failed_features.len());
             }
-            let (out, pl, skipped) = (name(p, format!("{}_clip", r.name))?, pl.to_string(), failed_features.len());
+            let (pl, skipped) = (pl.to_string(), failed_features.len());
             Ok(Box::new(move || {
                 let mut failed_parts = Vec::new();
                 let (cols, rows, mask) = rasterops::polygon_mask_with_failures(&r, &polygons, &mut failed_parts)?.ok_or_else(|| {
