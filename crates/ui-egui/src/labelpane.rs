@@ -362,11 +362,13 @@ fn rename_box(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, key: egui
         return;
     }
     if edit.lost_focus() {
+        // Compared as the command will keep it, but sent as typed: the command cuts a name past
+        // the limit and says so (#2122), which it can't if the box has cut it already.
         let name = label_class_name(&r.text);
         if name == c.it.name {
             return;
         }
-        if run(app, "labels.class.rename", json!({"class": c.it.name, "name": name})).is_some() {
+        if run(app, "labels.class.rename", json!({"class": c.it.name, "name": r.text})).is_some() {
             // Default stays chosen by no name; another class goes by its new one.
             if c.name.is_some() {
                 choose(ui, app, l, Some(&name));
@@ -2384,6 +2386,32 @@ mod tests {
         assert_eq!(names(h.state()), ["big", "Default"]);
         assert!(shown(&h, "big"), "still chosen by its new name");
         assert_eq!(h.state().session.undo_depth(), steps + 1);
+    }
+
+    /// A name typed past 100 characters is cut to them, and the cut is said (#2122): the box sends
+    /// the name as typed, so the command sees how long it was.
+    #[test]
+    fn a_long_name_typed_in_the_pane_is_cut_and_said() {
+        let mut app = with_cities();
+        app.run("labels.class.add", json!({"name": "Big"})).unwrap();
+        let mut h = harness(app);
+        h.run();
+        pick_class(&mut h, "Default", "Big");
+        h.get_by_label("Rename").click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.key_press(egui::Key::Backspace);
+        h.run();
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text(&"b".repeat(101));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let kept = "b".repeat(100);
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
+        assert!(shown(&h, &kept), "still chosen by its new name");
+        let said: Vec<&str> =
+            h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
+        assert_eq!(said, ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
     }
 
     /// A rename left open when the pane is hidden is gone when it shows again.
