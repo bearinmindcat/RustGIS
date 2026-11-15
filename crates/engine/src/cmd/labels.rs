@@ -3,7 +3,7 @@
 
 use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as Attr};
 use rustgis_geom::Coord;
-use rustgis_map::symbology::{MAX_LABEL_CLASSES, label_class_name};
+use rustgis_map::symbology::{MAX_LABEL_CLASS_NAME, MAX_LABEL_CLASSES, label_class_name};
 use rustgis_map::{LabelBackground, LabelClass, LabelMatcher, LabelPlacement, Labeling, Layer, Renderer, Rgba, Symbol};
 use serde_json::{Value, json};
 
@@ -379,11 +379,14 @@ pub fn commands() -> Vec<C> {
         C::new("labels.class.rename", "Rename Label Class", "View › Windows › Labeling", |s, p| {
             let class = s_req(p, "class")?.trim().to_string();
             let name = s_req(p, "name")?.to_string();
-            with_labels(s, p, |labels| {
-                let name = class_name(labels, &name, Some(&class))?;
-                labels.class_mut(&class).ok_or_else(|| format!("no label class named '{class}'"))?.name = name;
+            let mut kept = String::new();
+            let renamed = with_labels(s, p, |labels| {
+                kept = class_name(labels, &name, Some(&class))?;
+                labels.class_mut(&class).ok_or_else(|| format!("no label class named '{class}'"))?.name = kept.clone();
                 Ok(())
-            })
+            })?;
+            said_cut(s, &name, &kept);
+            Ok(renamed)
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .inputs(super::Inputs::single_layer)
         .when(need_feature_layer)
@@ -565,8 +568,8 @@ fn extra_class(labels: &Labeling, name: &str) -> Result<usize, String> {
     counted.position(|c| c.name.eq_ignore_ascii_case(name)).ok_or_else(|| format!("no label class named '{name}'"))
 }
 
-/// A class name: trimmed, kept short, and not another class's (`renaming` is the class being
-/// renamed, which may keep its own).
+/// A class name: trimmed, kept to the limit (the command says a cut, `said_cut`), and not
+/// another class's (`renaming` is the class being renamed, which may keep its own).
 fn class_name(labels: &Labeling, name: &str, renaming: Option<&str>) -> Result<String, String> {
     let name = label_class_name(name);
     if name.is_empty() {
@@ -577,6 +580,16 @@ fn class_name(labels: &Labeling, name: &str, renaming: Option<&str>) -> Result<S
         return Err(format!("there is already a label class named '{name}'"));
     }
     Ok(name)
+}
+
+/// A name given past a label class's limit is cut to it, and that is said with how much
+/// (#2122).
+fn said_cut(s: &mut Session, given: &str, kept: &str) {
+    let given = given.trim().chars().count();
+    if given > MAX_LABEL_CLASS_NAME {
+        let kept = kept.chars().count();
+        s.notify(format!("Label Classes: a label class's name takes at most {MAX_LABEL_CLASS_NAME} characters, so the name given ({given}) is cut to {kept}"), false);
+    }
 }
 
 /// A class clause parameter (`"where"`): `None` leaves it, `Some(None)` clears it, and a clause is
@@ -615,6 +628,7 @@ fn add_class(s: &mut Session, p: &Value) -> CmdResult {
         added = name;
         Ok(())
     })?;
+    said_cut(s, &name, &added);
     Ok(json!({"class": added}))
 }
 
