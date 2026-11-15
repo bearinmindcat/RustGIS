@@ -6561,7 +6561,11 @@ fn a_label_class_name_over_100_characters_is_cut_and_said() {
     };
     let mark = s.notice_mark();
     assert_eq!(s.run("labels.class.add", &json!({"layer": id, "name": at(101)})).unwrap()["class"], at(100));
-    assert_eq!(cut(&s, mark), ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
+    let want = format!(
+        "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{}'",
+        at(100)
+    );
+    assert_eq!(cut(&s, mark), [want]);
     let b = "b".repeat(100);
     let mark = s.notice_mark();
     assert_eq!(s.run("labels.class.add", &json!({"layer": id, "name": format!("  {b}  ")})).unwrap()["class"], b);

@@ -2411,7 +2411,10 @@ mod tests {
         assert!(shown(&h, &kept), "still chosen by its new name");
         let said: Vec<&str> =
             h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
-        assert_eq!(said, ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
+        let want = format!(
+            "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{kept}'"
+        );
+        assert_eq!(said, [want.as_str()]);
     }
 
     /// A name typed past 100 characters whose cut is the class's own name is still sent, so the
@@ -2436,7 +2439,10 @@ mod tests {
         assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
         let said: Vec<&str> =
             h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
-        assert_eq!(said, ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
+        let want = format!(
+            "Label Classes: Cities: a label class's name takes at most 100 characters, so the name given (101) is cut to 100, kept as '{kept}'"
+        );
+        assert_eq!(said, [want.as_str()]);
     }
 
     /// A rename left open when the pane is hidden is gone when it shows again.

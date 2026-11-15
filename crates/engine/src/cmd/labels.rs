@@ -385,7 +385,7 @@ pub fn commands() -> Vec<C> {
                 labels.class_mut(&class).ok_or_else(|| format!("no label class named '{class}'"))?.name = kept.clone();
                 Ok(())
             })?;
-            said_cut(s, &name, &kept);
+            said_cut(s, p, &name, &kept);
             Ok(renamed)
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .inputs(super::Inputs::single_layer)
@@ -582,19 +582,22 @@ fn class_name(labels: &Labeling, name: &str, renaming: Option<&str>) -> Result<S
     Ok(name)
 }
 
-/// A name given past a label class's limit is cut to it, and that is said with how much
-/// (#2122).
-fn said_cut(s: &mut Session, given: &str, kept: &str) {
+/// A name given past a label class's limit is cut to it, and that is said with how much, the
+/// layer it's on and the name kept (#2122).
+fn said_cut(s: &mut Session, p: &Value, given: &str, kept: &str) {
     let given = given.trim().chars().count();
     if given > MAX_LABEL_CLASS_NAME {
-        let kept = kept.chars().count();
+        let layer = s.layer_id(p).ok().and_then(|id| s.map().layer(id)).map(|l| l.name.clone()).unwrap_or_default();
+        let kept_len = kept.chars().count();
         s.notify_text(
             NoticeText::format(
-                "Label Classes: a label class's name takes at most {max} characters, so the name given ({given}) is cut to {kept}",
+                "Label Classes: {layer}: a label class's name takes at most {max} characters, so the name given ({given}) is cut to {kept}, kept as '{class}'",
                 [
+                    ("layer", layer.into()),
                     ("max", MAX_LABEL_CLASS_NAME.to_string().into()),
                     ("given", given.to_string().into()),
-                    ("kept", kept.to_string().into()),
+                    ("kept", kept_len.to_string().into()),
+                    ("class", kept.to_string().into()),
                 ],
             ),
             false,
@@ -638,7 +641,7 @@ fn add_class(s: &mut Session, p: &Value) -> CmdResult {
         added = name;
         Ok(())
     })?;
-    said_cut(s, &name, &added);
+    said_cut(s, p, &name, &added);
     Ok(json!({"class": added}))
 }
 
