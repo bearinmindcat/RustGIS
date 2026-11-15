@@ -588,7 +588,17 @@ fn said_cut(s: &mut Session, given: &str, kept: &str) {
     let given = given.trim().chars().count();
     if given > MAX_LABEL_CLASS_NAME {
         let kept = kept.chars().count();
-        s.notify(format!("Label Classes: a label class's name takes at most {MAX_LABEL_CLASS_NAME} characters, so the name given ({given}) is cut to {kept}"), false);
+        s.notify_text(
+            NoticeText::format(
+                "Label Classes: a label class's name takes at most {max} characters, so the name given ({given}) is cut to {kept}",
+                [
+                    ("max", MAX_LABEL_CLASS_NAME.to_string().into()),
+                    ("given", given.to_string().into()),
+                    ("kept", kept.to_string().into()),
+                ],
+            ),
+            false,
+        );
     }
 }
 

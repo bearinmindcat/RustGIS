@@ -362,10 +362,10 @@ fn rename_box(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, c: &Class, key: egui
         return;
     }
     if edit.lost_focus() {
-        // Compared as the command will keep it, but sent as typed: the command cuts a name past
-        // the limit and says so (#2122), which it can't if the box has cut it already.
+        // Left alone only when unchanged as typed. A name past the limit is sent as typed even when
+        // its cut is the class's own name: the command cuts it and says so (#2122).
         let name = label_class_name(&r.text);
-        if name == c.it.name {
+        if r.text.trim() == c.it.name {
             return;
         }
         if run(app, "labels.class.rename", json!({"class": c.it.name, "name": r.text})).is_some() {
@@ -2409,6 +2409,31 @@ mod tests {
         let kept = "b".repeat(100);
         assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
         assert!(shown(&h, &kept), "still chosen by its new name");
+        let said: Vec<&str> =
+            h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
+        assert_eq!(said, ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
+    }
+
+    /// A name typed past 100 characters whose cut is the class's own name is still sent, so the
+    /// cut is said (#2122), rather than the box closing silently.
+    #[test]
+    fn a_long_name_typed_in_the_pane_that_cuts_to_the_same_name_is_said() {
+        let kept = "b".repeat(100);
+        let mut app = with_cities();
+        app.run("labels.class.add", json!({"name": &kept})).unwrap();
+        let mut h = harness(app);
+        h.run();
+        pick_class(&mut h, "Default", &kept);
+        h.get_by_label("Rename").click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.key_press(egui::Key::Backspace);
+        h.run();
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text(&"b".repeat(101));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
         let said: Vec<&str> =
             h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
         assert_eq!(said, ["Label Classes: a label class's name takes at most 100 characters, so the name given (101) is cut to 100"]);
