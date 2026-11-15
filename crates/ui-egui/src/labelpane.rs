@@ -2422,20 +2422,26 @@ mod tests {
     #[test]
     fn a_long_name_typed_in_the_pane_that_cuts_to_the_same_name_is_said() {
         let kept = "b".repeat(100);
-        let mut app = with_cities();
-        app.run("labels.class.add", json!({"name": &kept})).unwrap();
-        let mut h = harness(app);
+        let mut h = harness(with_cities());
         h.run();
-        pick_class(&mut h, "Default", &kept);
-        h.get_by_label("Rename").click();
+        // A class made and renamed through the pane: a 100-character name is wider than the
+        // chooser, which the test can't click.
+        h.get_by_label("New").click();
         h.run();
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.key_press(egui::Key::Backspace);
-        h.run();
-        h.get_by_role(egui::accesskit::Role::TextInput).type_text(&"b".repeat(101));
-        h.run();
-        h.key_press(egui::Key::Enter);
-        h.run();
+        let rename = |h: &mut egui_kittest::Harness<'static, RustGisApp>, text: &str| {
+            h.get_by_label("Rename").click();
+            h.run();
+            h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+            h.key_press(egui::Key::Backspace);
+            h.run();
+            h.get_by_role(egui::accesskit::Role::TextInput).type_text(text);
+            h.run();
+            h.key_press(egui::Key::Enter);
+            h.run();
+        };
+        rename(&mut h, &kept);
+        assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
+        rename(&mut h, &"b".repeat(101));
         assert_eq!(names(h.state()), [kept.as_str(), "Default"]);
         let said: Vec<&str> =
             h.state().session.notices.iter().filter(|n| n.text.starts_with("Label Classes:")).map(|n| n.text.as_str()).collect();
