@@ -207,14 +207,36 @@ pub fn commands() -> Vec<C> {
 /// The shared item bytes of a kind: its name, bytes and source. Rasters drawn into it without
 /// their cast shadows are said (see [`super::share::saying_shadows`]).
 pub fn share_bytes(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String), String> {
+    let (name, bytes, source, notes) = share_output(s, kind, p)?;
+    for note in notes {
+        s.notify(note, false);
+    }
+    Ok((name, bytes, source))
+}
+
+/// Shared-item construction notes are deferred when a front end still needs to deliver bytes.
+pub(crate) fn share_output(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String, Vec<String>), String> {
     let what = match kind {
         "webMap" => "The web map",
         "webLayer" => "The web layer",
         _ => "The shared item",
     };
-    super::share::saying_shadows(s, what, |s| share_bytes_inner(s, kind, p))
+    let notes = match kind {
+        "webMap" | "geodataService" | "webScene" if s.constructions.len > 0 => {
+            let m = map_of(s, p)?;
+            s.constructions.output_notes(m.layers.iter().filter(|l| shared_layer(kind, l)).map(|l| (m.instance_id(), l)))?
+        }
+        "webLayer" | "locator" => {
+            let l = layer_of(s, p)?;
+            s.constructions.export_notes(s.map().instance_id(), &l)?
+        }
+        _ => Vec::new(),
+    };
+    let (name, bytes, source) = super::share::saying_shadows(s, what, |s| share_bytes_inner(s, kind, p))?;
+    Ok((name, bytes, source, notes))
 }
 
+/// Build the saved payload for each share kind; web tools carry capabilities of their steps.
 fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, Vec<u8>, String), String> {
     match kind {
         "webMap" => {
@@ -252,19 +274,7 @@ fn share_bytes_inner(s: &mut Session, kind: &str, p: &Value) -> Result<(String, 
             let m = s.project.models.get_mut(i).ok_or("make a model first (ModelBuilder)")?;
             let name = m.name.clone();
             let (bytes, report) = crate::durable::output(m, None, |m| {
-                let params: Vec<Value> = m
-                    .steps
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(i, st)| {
-                        st.params
-                            .as_object()
-                            .into_iter()
-                            .flatten()
-                            .map(move |(k, v)| json!({"step": i + 1, "tool": st.tool, "name": k, "default": v}))
-                    })
-                    .collect();
-                let tool = json!({"format": "RustGIS web tool", "version": crate::model::WEB_TOOL_VERSION, "name": m.name, "steps": m.steps, "parameters": params});
+                let tool = crate::model::to_web_tool_file(&m.name, &m.steps);
                 serde_json::to_vec_pretty(&tool).map_err(|e| e.to_string())
             })?;
             crate::durable::notify(s, &report);

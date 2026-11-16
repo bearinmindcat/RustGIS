@@ -655,9 +655,9 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
     let ext = Path::new(&path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     let gpkg = gpkg_table(p, &ext)?;
     let compatibility = ps(p, "crs").and_then(|text| asked.and_then(|crs| rustgis_data::raster::wkt::typed_crs_note(text, crs)));
-    let (boxes, map) = (s.boxes.clone(), s.map().instance_id());
+    let (boxes, map) = (s.constructions.clone(), s.map().instance_id());
     Ok(Box::new(move || {
-        let note = boxes.export_note(map, &l)?;
+        let note = boxes.export_notes(map, &l)?;
         let mut wrote = write_layer(&l, &path, asked, gpkg)?;
         wrote.notes.extend(note);
         if let Some(note) = compatibility {
@@ -674,6 +674,22 @@ pub(crate) fn layer_work(s: &Session, p: &Value) -> Result<Work, String> {
 pub fn read_date_notes(file: &str, layer: &str, lost: &rustgis_map::Unreadable) -> Vec<String> {
     let empty = lost.dates.iter().map(|n| format!("{file}: {layer}: {n}, so they're empty in the export"));
     empty.chain(lost.rounded.iter().map(|n| format!("{file}: {layer}: {n} when read for the export"))).collect()
+}
+
+/// The complete diagnostics from a whole read made for an export, including metadata losses
+/// discovered by a temporary source opening that the live layer never received.
+pub fn read_notes(file: &str, layer: &str, lost: &rustgis_map::Unreadable) -> Vec<String> {
+    read_date_notes(file, layer, lost).into_iter().chain(lost.messages.iter().map(|n| format!("{file}: {n}"))).collect()
+}
+
+/// A counted source Z/M diagnostic replaces only the equivalent generic export warning.
+/// Resident/older layers and custom providers without that diagnostic keep their warning.
+pub fn coalesce_read_zm(notes: &mut Vec<String>, file: &str, ds: &rustgis_data::Dataset, lost: &rustgis_map::Unreadable) {
+    if lost.zm_noted
+        && let Some(generic) = rustgis_data::zm_export_note([ds], file)
+    {
+        notes.retain(|note| note != &generic);
+    }
 }
 
 /// What a GeoPackage export of `ds` says of its dates: date-times written in UTC, and text in
@@ -748,7 +764,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
             let unfit = if parquet { rustgis_data::source::parquet::values_note(ds, path) } else { None };
             let null_numbers = rustgis_data::export::numbers_written_as_null(&ds.features, &ds.fields, &ext);
             let csv = if ext == "csv" { rustgis_data::io::CsvLosses::of(&ds.features, ds.geometry_type) } else { Default::default() };
-            let mut dates = read_date_notes(path, &ds.name, &unreadable);
+            let mut dates = read_notes(path, &ds.name, &unreadable);
             dates.extend(gpkg_dates_note(ds, &ext, path));
             (ds.features.len().saturating_sub(left_out), left_out, unread, table, unfit, null_numbers, None, csv, dates)
         }
@@ -759,6 +775,7 @@ fn write_layer(l: &rustgis_map::Layer, path: &str, asked: Option<Crs>, gpkg: Gpk
     // raster layer's extent is its raster's, which the file doesn't hold.
     let extent = if chunks.is_some() { l.extent() } else { ds.extent() };
     let mut notes = rustgis_data::export_notes([(ds, extent)], path, crs);
+    coalesce_read_zm(&mut notes, path, ds, &unreadable);
     if asked.is_none() {
         notes.extend(rustgis_data::io::default_export_note(ds, path));
     }
