@@ -3354,9 +3354,14 @@ fn colorbar(pm: &mut Canvas, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
     let width = |s: &str| text::measure(s, px / 1.33, false);
     let (mut top, bottom) = (r.y(), r.y() + r.height());
     if !bar.title.is_empty() {
-        let tpx = 9.0 * 1.33 * ppp;
-        text::text_at(pm, bar.title, r.x(), top + tpx * 0.6, tpx, dark, true, text::Align::Left, false);
-        top += tpx * 1.4;
+        let tpx = COLORBAR_TITLE_PT as f32 * 1.33 * ppp;
+        // Wrapped to the element's width (#2493), with a hundredth of a mm of slack for its box
+        // in pixels, so a title a publication made the box as wide as stays on one line.
+        let lines = colorbar_title_lines(bar.title, f64::from(r.width()) / (f64::from(ppp) * PT_PER_MM) + 0.01);
+        for (i, line) in lines.iter().enumerate() {
+            text::text_at(pm, line, r.x(), top + tpx * (0.6 + 1.25 * i as f32), tpx, dark, true, text::Align::Left, false);
+        }
+        top += tpx * (1.4 + 1.25 * lines.len().saturating_sub(1) as f32);
     }
     // Where each block or sample sits along the bar (0 low to 1 high), and the labels with theirs.
     let (blocks, labels): (Vec<Rgba>, Vec<(f32, String)>) = match scale {
@@ -3510,6 +3515,33 @@ pub(crate) fn wrapped(s: &str, width: f64, size: f64, style: TextStyle) -> Strin
     // Lines past the 200 a text draws aren't broken: one more, with text, tells the cut-off check
     // it goes on.
     crate::report::wrap_lines(s, width * WRAP_PX_PER_MM, measure, 200).join("\n")
+}
+
+/// A colorbar's title's size in points; it is drawn bold.
+pub const COLORBAR_TITLE_PT: f64 = 9.0;
+
+/// A colorbar's title's style, as [`colorbar_title_lines`] measures it: bold, from the left edge.
+fn colorbar_title_style() -> TextStyle {
+    TextStyle { face: text::Face { bold: true, ..Default::default() }, align: TextAlign::Left, spacing: 0.0 }
+}
+
+/// A colorbar's title's width in mm, its widest line, measured as [`colorbar_title_lines`] breaks
+/// it.
+pub fn colorbar_title_width_mm(title: &str) -> f64 {
+    let px = (COLORBAR_TITLE_PT * 1.33 * WRAP_PX_PER_MM / PT_PER_MM) as f32;
+    let face = colorbar_title_style().face;
+    title.lines().map(|line| f64::from(text::styled_extent(line, px, face, 0.0).1)).fold(0.0, f64::max) / WRAP_PX_PER_MM
+}
+
+/// A colorbar's title as the lines it is drawn in (#2493): broken at spaces to fit `width` mm, a
+/// word wider than that across lines, as a wrapped text is ([`wrapped`]), at one resolution
+/// whatever it is drawn at, so the page, each export and a publication's sizing break it alike. A
+/// title of one line that fits is that line, as it is.
+pub fn colorbar_title_lines(title: &str, width: f64) -> Vec<String> {
+    if !title.contains('\n') && colorbar_title_width_mm(title) <= width {
+        return vec![title.to_string()];
+    }
+    wrapped(title, width, COLORBAR_TITLE_PT, colorbar_title_style()).lines().map(str::to_string).collect()
 }
 
 /// The distance between two lines of text at `size` points, in mm, as [`text_block`] sets them.
@@ -6863,6 +6895,30 @@ Elaboração: RustGIS",
 
     fn rgb(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8) {
         pm.pixel(x, y).map(|p| (p.red(), p.green(), p.blue())).unwrap_or((255, 255, 255))
+    }
+
+    /// A colorbar's title longer than the element is wide wraps inside it (#2493), every word kept;
+    /// the bar goes under its lines.
+    #[test]
+    fn a_colorbars_long_title_wraps_inside_it() {
+        let scale = ColorScale::Ramp { lo: 0.0, hi: 10.0, colors: vec![Rgba::rgb(200, 200, 200), Rgba::rgb(230, 230, 230)] };
+        let title = "Precipitação média mensal JAXA GSMaP (mm/mês), jan–mar 2025";
+        let bar =
+            Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
+        // A canvas wider than the element, so ink past its right edge shows.
+        let mut c = Canvas::new(600, 200).unwrap();
+        let r = Rect::from_xywh(10.0, 10.0, 200.0, 150.0).unwrap();
+        colorbar(&mut c, r, &scale, &bar, 1.0);
+        let dark = |x: u32, y: u32| c.pixmap().pixel(x, y).is_some_and(|p| p.alpha() > 128 && p.red() < 120);
+        let past = (r.right().ceil() as u32 + 1..600).find(|x| (0..200).any(|y| dark(*x, y)));
+        assert_eq!(past, None, "the title's ink past the element's right edge");
+        let lines = colorbar_title_lines(title, 200.0 / PT_PER_MM + 0.01);
+        assert!(lines.len() >= 2, "{lines:?}");
+        assert_eq!(lines.concat().replace(' ', ""), title.replace(' ', ""), "every word is kept");
+        // The second line is inked, under the first.
+        let pitch = (COLORBAR_TITLE_PT * 1.33 * 1.25) as u32;
+        let line = |y0: u32| (y0..y0 + 8).any(|y| (10..210).any(|x| dark(x, y)));
+        assert!(line(10 + pitch + 3), "a second line of title");
     }
 
     #[test]
