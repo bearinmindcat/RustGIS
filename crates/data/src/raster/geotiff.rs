@@ -764,6 +764,8 @@ pub(crate) struct Unpaletted<R> {
     /// Whether the first image is an RGB image with samples past the colour ones (shown to the
     /// decoder as grey): its first three samples are red, green and blue, every sample read.
     first_wide_rgb: bool,
+    /// How many images' SampleFormat says undefined (4), shown as unsigned (#2593).
+    void_formats: usize,
     pos: u64,
 }
 
@@ -777,11 +779,12 @@ const MAX_ENTRIES: u64 = 4096;
 /// Each SampleFormat value of 4 (undefined) is patched to 1 too, in the entry or in the array it
 /// points to (#2593). Returns the patches, whether the first image is a palette image, and whether
 /// it is such an RGB image.
-fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, bool) {
+fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, bool, usize) {
     use std::io::SeekFrom;
     let mut patches = Vec::new();
-    // Whether the first image is one of them, and whether it is an RGB image with more samples.
-    let (mut first, mut first_wide) = (false, false);
+    // Whether the first image is one of them, and whether it is an RGB image with more samples;
+    // how many images have a SampleFormat of 4.
+    let (mut first, mut first_wide, mut void_images) = (false, false, 0);
     let mut walk = || -> Option<()> {
         let mut head = [0u8; 16];
         r.seek(SeekFrom::Start(0)).ok()?;
@@ -879,18 +882,31 @@ fn palette_patches<R: Read + Seek>(r: &mut R) -> (Vec<(u64, [u8; 2])>, bool, boo
             if let Some((at, count)) = format {
                 let mut values = vec![0u8; count as usize * 2];
                 if r.seek(SeekFrom::Start(at)).is_ok() && r.read_exact(&mut values).is_ok() {
+                    let before = patches.len();
                     for (j, v) in values.as_chunks::<2>().0.iter().enumerate() {
                         if u16_(v.as_slice()) == Some(4) {
                             patches.push((at + 2 * j as u64, one));
                         }
                     }
+                    void_images += usize::from(patches.len() > before);
                 }
             }
         }
         Some(())
     };
     let _ = walk();
-    (patches, first, first_wide)
+    // In the order they come in the file, so that a read looks only at those it reaches: a
+    // crafted file may have thousands of SampleFormat values.
+    patches.sort_unstable_by_key(|p| p.0);
+    (patches, first, first_wide, void_images)
+}
+
+/// What a read says of a file whose SampleFormat is undefined (4) in `images` of its images,
+/// read as unsigned whole numbers ([`Unpaletted`], #2593): `None` when none is.
+pub(crate) fn void_sample_format_note(images: usize) -> Option<String> {
+    let which = if images > 1 { format!(" in {images} images") } else { String::new() };
+    (images > 0)
+        .then(|| format!("its sample format is undefined (SampleFormat 4){which}: read as unsigned whole numbers, as GDAL reads it"))
 }
 
 /// Any reader, boxed: the decoder is compiled once for every kind of source (a file, bytes in
@@ -917,13 +933,18 @@ impl<R> Unpaletted<R> {
     pub(crate) fn first_is_wide_rgb(&self) -> bool {
         self.first_wide_rgb
     }
+
+    /// How many of the file's images have a SampleFormat of 4 (undefined), read as unsigned.
+    pub(crate) fn void_sample_formats(&self) -> usize {
+        self.void_formats
+    }
 }
 
 impl<R: Read + Seek> Unpaletted<R> {
     fn new(mut inner: R) -> std::io::Result<Self> {
-        let (patches, first_palette, first_wide_rgb) = palette_patches(&mut inner);
+        let (patches, first_palette, first_wide_rgb, void_formats) = palette_patches(&mut inner);
         inner.seek(std::io::SeekFrom::Start(0))?;
-        Ok(Unpaletted { inner, patches, first_palette, first_wide_rgb, pos: 0 })
+        Ok(Unpaletted { inner, patches, first_palette, first_wide_rgb, void_formats, pos: 0 })
     }
 }
 
@@ -931,7 +952,9 @@ impl<R: Read> Read for Unpaletted<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.inner.read(buf)?;
         let (start, end) = (self.pos, self.pos + n as u64);
-        for (at, bytes) in &self.patches {
+        // Sorted by place ([`palette_patches`]): only those this read reaches are looked at.
+        let from = self.patches.partition_point(|(at, _)| at + 2 <= start);
+        for (at, bytes) in self.patches[from..].iter().take_while(|(at, _)| *at < end) {
             for (k, b) in bytes.iter().enumerate() {
                 let p = at + k as u64;
                 if p >= start
@@ -1382,6 +1405,7 @@ pub(super) fn read_limited_with_nodata(
     // overviews of it.
     let palette = r.first_is_palette();
     let wide_rgb = r.first_is_wide_rgb();
+    let void_formats = void_sample_format_note(r.void_sample_formats());
     let limits = {
         let mut l = Limits::default();
         l.decoding_buffer_size = decoding_limit();
@@ -1662,6 +1686,7 @@ pub(super) fn read_limited_with_nodata(
         r.lost.extend(copyright_lost);
         r.lost.extend(table_lost);
         r.lost.extend(mask_lost);
+        r.lost.extend(void_formats);
         if let Some(p) = &described {
             r.apply_pam(p, super::pam::GDAL_METADATA);
         }
@@ -1741,6 +1766,7 @@ pub(super) fn read_limited_with_nodata(
     r.lost.extend(turned);
     r.lost.extend(table_lost);
     r.lost.extend(mask_lost);
+    r.lost.extend(void_formats);
     if let Some(p) = &described {
         r.apply_pam(p, super::pam::GDAL_METADATA);
     }
@@ -3422,6 +3448,9 @@ mod tests {
             let got = read(std::io::Cursor::new(&void), name).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!((got.data_type.as_str(), got.band_count()), (want.data_type.as_str(), want.band_count()), "{name}");
             assert!(got.bands.iter().zip(&want.bands).all(|(a, b)| a.data == b.data), "{name}: the values");
+            // Said, as read otherwise than the tag says; the file with 1 says nothing.
+            let said = |lost: &[String]| lost.iter().any(|n| n.contains("SampleFormat 4"));
+            assert!(said(&got.lost) && !said(&want.lost), "{name}: {:?} {:?}", got.lost, want.lost);
             if name == "strips" {
                 continue;
             }
@@ -3433,6 +3462,7 @@ mod tests {
             };
             let (l, lv) = (layout(&void), layout(&file));
             assert!(l.levels.len() > 1, "{name}: overviews");
+            assert!(said(&l.lost) && !said(&lv.lost), "{name}: {:?} {:?}", l.lost, lv.lost);
             for level in 0..l.levels.len() {
                 let (at, n) = (l.levels[level].offsets[0] as usize, l.levels[level].counts[0] as usize);
                 let tile = |file: &[u8], l: &super::super::cog::Layout| {

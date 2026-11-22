@@ -338,6 +338,8 @@ fn read_layout(r: Sparse) -> Result<Parse> {
     // An RGB image with more bands (shown to the decoder as grey, see `Unpaletted`): every band,
     // the first three red, green and blue.
     let wide_rgb = rd.first_is_wide_rgb();
+    // A SampleFormat of 4 (undefined) is read as unsigned: said (#2593).
+    let void_formats = super::geotiff::void_sample_format_note(rd.void_sample_formats());
     let mut dec = Decoder::new(rd).map_err(err)?.with_limits(limits());
     let Some(geo) = super::geotiff::cog_geo(&mut dec)? else {
         return Ok(Parse::NotTiled("a rotated image, or one without coordinates, is read whole".into()));
@@ -385,6 +387,7 @@ fn read_layout(r: Sparse) -> Result<Parse> {
     };
     // Another body's system is said, as when the file is read whole.
     let mut lost: Vec<String> = super::planetary::note_of(geo.0).into_iter().collect();
+    lost.extend(void_formats);
     let palette = match color {
         ColorHint::Gray if palette_image => match tag(&mut dec, Tag::ColorMap)? {
             Ok(None) => {
