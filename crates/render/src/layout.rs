@@ -279,7 +279,8 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
                         .and_then(|l| l.raster.as_ref())
                         .and_then(rustgis_map::layout::color_scale)?;
                     let lines = colorbar_title_lines(title, e.w);
-                    let fits = colorbar_title_drawn(lines.len(), r.y(), r.bottom(), COLORBAR_TITLE_PT as f32 * 1.33 * ppp);
+                    let limit = r.bottom() - colorbar_bar_room(ppp);
+                    let fits = colorbar_title_drawn(lines.len(), r.y(), limit, COLORBAR_TITLE_PT as f32 * 1.33 * ppp);
                     let s = lines.join("\n");
                     (s, COLORBAR_TITLE_PT as f32, colorbar_title_style().face, TextAlign::Left, 0.0, 0.0, false, true, Some(fits))
                 }
@@ -3486,7 +3487,7 @@ fn colorbar(pm: &mut Canvas, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
         // ([`colorbar_title_drawn`]). Those left out are said with the page's cut-off texts
         // ([`text_losses`]).
         let lines = colorbar_title_lines(bar.title, f64::from(r.width()) / (f64::from(ppp) * PT_PER_MM));
-        let drawn = colorbar_title_drawn(lines.len(), top, bottom, tpx);
+        let drawn = colorbar_title_drawn(lines.len(), top, bottom - colorbar_bar_room(ppp), tpx);
         for (i, line) in lines.iter().take(drawn).enumerate() {
             text::text_at(pm, line, r.x(), top + tpx * (0.6 + 1.25 * i as f32), tpx, dark, true, text::Align::Left, false);
         }
@@ -3679,13 +3680,21 @@ pub fn colorbar_title_lines(title: &str, width: f64) -> Vec<String> {
     wrapped(title, width, COLORBAR_TITLE_PT, colorbar_title_style()).lines().map(str::to_string).collect()
 }
 
-/// How many of a colorbar's `lines` of title it draws in an element from `top` to `bottom`
-/// (pixels), its title at `px` pixels (#2493): the first always, as a title of one line always
-/// was; each further one only when the room it takes ends inside the element; at most 200. The
-/// page's cut-off check ([`text_losses`]) counts the rest the same way.
-fn colorbar_title_drawn(lines: usize, top: f32, bottom: f32, px: f32) -> usize {
-    let further = (1..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= bottom + 0.5).count();
+/// How many of a colorbar's `lines` of title it draws in an element from `top` (pixels), its
+/// title at `px` pixels (#2493): the first always, as a title of one line always was; each
+/// further one only when the room it takes ends by `limit`, the element's bottom less the bar's
+/// own room ([`colorbar_bar_room`]), so the bar keeps its labels; at most 200. The page's
+/// cut-off check ([`text_losses`]) counts the rest the same way.
+fn colorbar_title_drawn(lines: usize, top: f32, limit: f32, px: f32) -> usize {
+    let further = (1..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= limit + 0.5).count();
     usize::from(lines > 0) + further
+}
+
+/// The least room a colorbar's bar takes under its title, in pixels at `ppp` (#2638): a bar of
+/// 3 points with its ticks and 8-point labels under it, as [`colorbar`] lays them out. A title
+/// stops short of it, so its lines never leave the bar without its labels.
+fn colorbar_bar_room(ppp: f32) -> f32 {
+    (8.0 * 1.33 * 1.2 + 2.5 + 1.5 + 3.0) * ppp
 }
 
 /// The distance between two lines of text at `size` points, in mm, as [`text_block`] sets them.
@@ -7282,6 +7291,28 @@ Elaboração: RustGIS",
         let pitch = (COLORBAR_TITLE_PT * 1.33 * 1.25) as u32;
         let line = |y0: u32| (y0..y0 + 8).any(|y| (10..210).any(|x| dark(x, y)));
         assert!(line(10 + pitch + 3), "a second line of title");
+    }
+
+    /// A colorbar's title stops short of the bar's own room, so a long title never leaves the bar
+    /// without its tick labels: the bar ends above them, its labels under it (#2638). Before, the
+    /// title's second line took the room, and the bar filled the element's bottom with no labels.
+    #[test]
+    fn a_colorbars_long_title_leaves_its_bar_room_for_labels() {
+        // A red-to-blue bar, so its pixels are told apart from the grey text.
+        let scale = ColorScale::Ramp { lo: 0.0, hi: 10.0, colors: vec![Rgba::rgb(220, 30, 30), Rgba::rgb(30, 30, 220)] };
+        let title = "Precipitação média mensal JAXA GSMaP (mm/mês), jan–mar 2025";
+        let bar =
+            Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
+        // 100 × 40 px: room for two lines of title, but then only 8 px of bar, with no labels.
+        let mut c = Canvas::new(300, 200).unwrap();
+        colorbar(&mut c, Rect::from_xywh(10.0, 10.0, 100.0, 40.0).unwrap(), &scale, &bar, 1.0);
+        let px = |x: u32, y: u32| c.pixmap().pixel(x, y);
+        let coloured =
+            |y: u32| (10..110).any(|x| px(x, y).is_some_and(|p| p.alpha() > 200 && p.green() < 90 && p.red().abs_diff(p.blue()) > 60));
+        let dark = |y: u32| (10..110).any(|x| px(x, y).is_some_and(|p| p.alpha() > 128 && p.red() < 120 && p.blue() < 120));
+        assert!((26..36).any(coloured), "the bar under the title");
+        assert!(!(44..50).any(coloured), "the bar ends above its labels, not at the element's bottom");
+        assert!((40..50).any(dark), "its labels under it");
     }
 
     /// A colorbar too short for its title's lines draws those that fit inside it, not lines past

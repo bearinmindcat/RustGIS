@@ -791,6 +791,17 @@ pub(crate) fn veil_panel(
 /// its labels.
 const COLORBAR_MM: f64 = 15.0;
 
+/// The height a publication gives its colorbar in a legend's box `ih` mm high inside, in mm,
+/// when its title needs `need` (#2493). Over the map it leaves the rows the room they were sized
+/// to (`rows`, with the gap above the colorbar), so a title past the box's cap is cut short
+/// rather than taking them; but never below a colorbar's own height while the box has it, so
+/// the bar isn't lost to rows that fill the box: those are cut and said instead (#2638). In a
+/// side column it takes what it needs of the box.
+pub(crate) fn colorbar_fit(need: f64, ih: f64, rows: f64, over_map: bool) -> f64 {
+    let ih = ih.max(0.0);
+    if over_map { need.min((ih - rows).max(COLORBAR_MM.min(ih))) } else { need.min(ih) }
+}
+
 /// A publication layout's colorbar's height, in mm, `width` mm wide: [`COLORBAR_MM`] and a line's
 /// pitch more for each line its title wraps to past the first (#2493).
 fn colorbar_mm(title: &str, width: f64) -> f64 {
@@ -2846,9 +2857,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         // the colorbar asked for (the rows in more columns): fewer lines leave the rows more room.
         let (ix, iy, iw, ih) = (r.0 + pad, r.1 + pad, lw - 2.0 * pad, lh - 2.0 * pad);
         let bar_need = bar.as_deref().map_or(0.0, |title| colorbar_mm(title, iw));
-        // Over the map the colorbar leaves the rows the height they were sized to (`ch`, the chosen
-        // column count's), so a title past the box's cap is cut short rather than taking the rows.
-        let bar_fit = if over_map { bar_need.min((ih - ch - bar_gap).max(0.0)) } else { bar_need.min(ih) };
+        let bar_fit = colorbar_fit(bar_need, ih, ch + bar_gap, over_map);
         let rows_h = (ih - bar_fit - if bar.is_some() { bar_gap } else { 0.0 }).max(0.0);
         warnings.extend(legend_fit_warnings(legend_cols, (cw, ch), (iw, rows_h)).into_iter().map(String::from));
         let short = bar_need > bar_fit + LEGEND_FIT_MM;
