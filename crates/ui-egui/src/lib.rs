@@ -16,6 +16,7 @@ mod arcgisui;
 #[cfg(not(target_arch = "wasm32"))]
 mod assistantkeys;
 mod assistantpane;
+mod assistantpictures;
 mod autosave;
 mod backstage;
 mod bookmarkpane;
@@ -208,6 +209,14 @@ pub const SCRIPT_PICK: &str = "\u{1}script:";
 /// `<id>:`: it goes to the marker whose «Image…» asked for it, and only a file so marked, for the
 /// request still waiting, does.
 pub const MARKER_PICK: &str = "\u{1}marker:";
+
+/// Starts the name of a picture the shell's `"assistantPicture"` picker put in the inbox: it is
+/// attached to the AI Assistant's next message, not opened on the map.
+pub const ASSISTANT_PICK: &str = "\u{1}assistantPicture:";
+
+/// The largest picture file the AI Assistant takes; the browser's and the phone's shells refuse a
+/// larger one before reading it.
+pub const ASSISTANT_FILE_MAX_BYTES: usize = rustgis_assistant::attach::MAX_FILE_BYTES;
 
 /// The largest image file a marker takes: one whose base64 fits the engine's limit
 /// ([`rustgis_engine::map::symbology::MAX_PICTURE_BYTES`]). The browser's and the phone's shells
@@ -1475,7 +1484,10 @@ impl RustGisApp {
             Some(Value::Number(_) | Value::String(_)) => {}
             // Not taken for the active layer: with replaceTable that would overwrite a table.
             Some(other) => {
-                return Err(crate::i18n::fmt("\"layer\" must be a layer's id or name, not {value}", &[("value", &other.to_string())]));
+                return Err(crate::i18n::fmt(
+                    "\"layer\" must be a layer's id or name, not {value}",
+                    &[("value", &crate::theme::clip(&other.to_string()))],
+                ));
             }
         }
         let id = self.session.layer_id(p)?;
@@ -2171,6 +2183,13 @@ impl RustGisApp {
             panes::received_file(self, name, bytes);
             return Ok(Value::Null);
         }
+        if let Some(name) = name.strip_prefix(ASSISTANT_PICK) {
+            // An answer with no name is a cancelled picker.
+            if !name.is_empty() {
+                assistantpictures::received(self, name, bytes.to_vec());
+            }
+            return Ok(Value::Null);
+        }
         if let Some(name) = name.strip_prefix(SHAPEFILE_PICK) {
             if !name.to_ascii_lowercase().ends_with(".zip") {
                 let error = tl!("Choose a zipped Shapefile, or pick its .shp and .dbf together.").to_string();
@@ -2386,8 +2405,8 @@ impl RustGisApp {
             return Err(tl!("this build saves projects with Save As").into());
         }
         let stem: String = stem.chars().take(200).collect();
-        // Not an undoable edit: saving names the project, as `project.saveAs` does, once the
-        // browser takes the file.
+        // Not an undoable edit: saving names the project, as `project.saveAs` does. The name
+        // stays set while the download is offered, and goes back if the download fails.
         let construction_notes = self.session.construction_output_notes()?;
         let old = std::mem::replace(&mut self.session.project.name, stem.clone());
         let (text, report) = match self.session.project.saved_text(None) {
@@ -2935,6 +2954,8 @@ impl RustGisApp {
         self.map.deleting = None;
         // A spectral profile's points were read on the old project's rasters.
         self.workflow.spectral.clear();
+        crate::analysispane::forget_similar(&mut self.workflow);
+        (self.workflow.result, self.workflow.error) = (None, None);
         self.retire_cog_probes();
         if let Some(steps) = self.ws.recording.take() {
             self.session.notify(
@@ -2961,6 +2982,19 @@ impl RustGisApp {
             self.landed_in_dialog(&p, Err(&why));
             self.session.notify(why, false);
         }
+    }
+
+    /// Says that the open field package's rows couldn't be kept (`offline.keepRows` was refused,
+    /// for `why`), and what that means for its return, and lets go of the rows it held for them.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn keep_refused(&mut self, why: &str) {
+        let name = self.session.project.name.clone();
+        self.session.forget_field_rows();
+        let text = i18n::fmt(
+            "The rows field package '{name}' gave couldn't be kept on this device ({why}): Send Field Package sends its whole map, which Bring Back refuses if its offline area has been brought back or synced since the package was made",
+            &[("name", &name), ("why", why)],
+        );
+        self.session.notify(text, true);
     }
 
     /// Runs a command by id: `ui.*` here, everything else in the engine.
@@ -3013,8 +3047,15 @@ impl RustGisApp {
             if id == "table.statistics" {
                 return readjob::run_then(self, "table.statistics", params, Some(table::statistics_landed));
             }
+            if id == "data.similar" {
+                return readjob::run(self, "data.similar", params);
+            }
             if id == "layer.sizeBy" {
                 return readjob::run(self, "layer.sizeBy", params);
+            }
+            // Reading a style's file and its images' files: on a thread of its own, with Cancel.
+            if id == "style.importQgis" {
+                return readjob::run(self, "style.importQgis", params);
             }
             // Publishing hashes, reads and writes the whole file: on a thread of its own, with
             // progress and Cancel, as an export is.
@@ -3148,6 +3189,17 @@ impl RustGisApp {
         if let Err(e) = &r {
             self.command_failed(id, e, notice_mark);
         }
+        // A field package from home opened: the rows it gave are kept on a thread of their own,
+        // with progress and Cancel, rather than as it opens.
+        #[cfg(not(target_arch = "wasm32"))]
+        if r.is_ok()
+            && id == "project.open"
+            && self.reads_off_frame
+            && self.session.field_rows_waiting()
+            && let Err(e) = readjob::run(self, "offline.keepRows", json!({}))
+        {
+            self.keep_refused(&e);
+        }
         // Commands can replace the project, switch maps or change the renderer while the pane
         // is closed. A field picked for the old context must not overwrite the new renderer.
         if self.ui.symbology_pending.as_ref().is_some_and(|pending| !pending.is_current(&self.session)) {
@@ -3161,6 +3213,8 @@ impl RustGisApp {
             self.map.deleting = None;
             // Nor are a spectral profile's points read on a namesake raster of the new one.
             self.workflow.spectral.clear();
+            crate::analysispane::forget_similar(&mut self.workflow);
+            (self.workflow.result, self.workflow.error) = (None, None);
             // A recording's steps name the old project's layers: it ends here, and says so.
             if let Some(steps) = self.ws.recording.take() {
                 let n = steps.len().to_string();
@@ -3719,9 +3773,14 @@ impl RustGisApp {
                 self.workflow.pick = None;
                 match section.and_then(|s| analysispane::SECTIONS.iter().find(|x| x.0 == s)) {
                     Some((id, _)) => {
+                        // Opening the same Similar section preserves its pending/completed result,
+                        // including when the pane was hidden while the worker finished.
+                        if *id != "similar" || self.workflow.section != *id {
+                            analysispane::forget_similar(&mut self.workflow);
+                            self.workflow.result = None;
+                            self.workflow.error = None;
+                        }
                         self.workflow.section = id;
-                        self.workflow.result = None;
-                        self.workflow.error = None;
                         self.ui.open_right(RightPane::Workflows);
                     }
                     None => toggle_right(&mut self.ui, RightPane::Workflows),
@@ -5184,10 +5243,10 @@ impl RustGisApp {
                 dbf_notes.extend(io::dates_as_text_note(&ds.fields, &name));
                 dbf_notes.extend(rustgis_engine::cmd::share::gpkg_dates_note(&ds, &ext, &name));
                 if lost.rows > 0 {
-                    dbf_notes.push(format!("{name}: {} rows couldn't be read and were left out", lost.rows));
+                    dbf_notes.push(rustgis_engine::cmd::whole::unread_notice(&name, lost.rows));
                 }
                 dbf_notes.extend(rustgis_engine::cmd::share::read_notes(&name, &l.name, &lost));
-                // CSV holds a point a row, GPX a name for each feature and no areas; reading text back trims it or reads blanks as null.
+                // CSV holds a point a row, GPX a name for each feature and no areas; reading text back, CSV reads blanks as null and KML and GPX trim it.
                 dbf_notes.extend(io::export_losses_notes(&ds, &ext, io::name_field(&ds), &name).map_err(|e| e.to_string())?);
                 drop(ds);
                 if let Some(note) = io::left_out_note(&name, &ext, left_out) {
@@ -5633,6 +5692,9 @@ impl RustGisApp {
             if public || check_origin.is_some() || claim.is_none() {
                 rustgis_engine::cmd::layer::mark_url_reach(bound_url, check_origin, public);
             }
+            // A byte range of a GRIB file (`"bytes"`), checked as the command checks it: only that
+            // range is downloaded (below), never probed, and read as the file.
+            let range = rustgis_engine::cmd::layer::byte_range(p, url)?;
             // A window of a cloud-optimised GeoTIFF is read off the frame (below), with no
             // probe: it is refused unless it is one. In the browser the command refuses it.
             let window = cfg!(not(target_arch = "wasm32")) && p.get("bbox").is_some_and(|v| !v.is_null());
@@ -5665,7 +5727,7 @@ impl RustGisApp {
                 && !tiff
                 && rustgis_engine::cmd::layer::is_unnamed_url(url)
                 && ["service", "coverage"].iter().all(|k| p.get(*k).and_then(Value::as_bool) != Some(true));
-            if !window && (remote || tiff || unnamed) && !scan && p.get("whole").and_then(Value::as_bool) != Some(true) {
+            if range.is_none() && !window && (remote || tiff || unnamed) && !scan && p.get("whole").and_then(Value::as_bool) != Some(true) {
                 let slot: Slot<Result<bool, String>> = Slot::default();
                 let land = slot.clone();
                 if remote {
@@ -5703,7 +5765,10 @@ impl RustGisApp {
                 self.ui.cog_probes.push((probe, claim, slot));
                 return Ok(Value::Null);
             }
-            let url = address;
+            let url = match range {
+                Some(r) => rustgis_engine::cmd::layer::ranged_address(&address, r),
+                None => address,
+            };
             // The request receipt is correlation only; its admitted claim stays outside JSON.
             let mut q = json!({"url": url});
             for k in ["name", "layer", "crs", "connection", "from"] {
@@ -5785,6 +5850,9 @@ impl RustGisApp {
                         public,
                         if q.get("geolibreProject").and_then(Value::as_bool) == Some(true) {
                             rustgis_engine::map::geolibre::MAX_TEXT
+                        } else if let Some((first, last)) = range {
+                            // A range's answer may be no longer than the range.
+                            usize::try_from(last - first + 1).unwrap_or(usize::MAX)
                         } else {
                             rustgis_engine::render::rustgis_tiles::cache::MAX_DOWNLOAD
                         },
@@ -5884,6 +5952,10 @@ impl RustGisApp {
         });
         for (id, url, mut p, r) in landed {
             let origin = connectiontree::take_origin_key(&mut p);
+            // A range's answer shorter than the range is refused, never read as the record.
+            let r = r
+                .map_err(|e| rustgis_engine::cmd::layer::range_failed(&url, e))
+                .and_then(|bytes| rustgis_engine::cmd::layer::check_range_answer(&url, &bytes).map(|()| bytes));
             match r {
                 Ok(bytes) => {
                     let landed = serviceui::Landed { id, url, params: p, origin };
@@ -6073,7 +6145,7 @@ impl RustGisApp {
         })?;
         // What a task needs to read it again, as the download itself can't be (`record_step`).
         let mut window = json!({});
-        for k in ["bbox", "cellSize", "cog"] {
+        for k in rustgis_engine::policy::WINDOW_KEYS {
             if let Some(v) = p.get(k).filter(|v| !v.is_null()) {
                 window[k] = v.clone();
             }
@@ -6490,6 +6562,15 @@ impl RustGisApp {
         annotation::sync(self);
         #[cfg(not(target_arch = "wasm32"))]
         self.session.statistics_need_read_ahead(self.reads_off_frame);
+        // A field package opened by a way other than `run` (a script on the file bridge) has its
+        // rows kept as one opened here does: the read takes them, so this starts it once.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.reads_off_frame
+            && self.session.field_rows_waiting()
+            && let Err(e) = readjob::run(self, "offline.keepRows", json!({}))
+        {
+            self.keep_refused(&e);
+        }
         let _diagnostics = self.session.diagnostics.enter();
         // What this thread draws (an image, a print, a page, a preview, an agent's snapshot)
         // never waits for cast shadows still being worked out: it says they were (Never hold the
@@ -8698,7 +8779,7 @@ mod download_service_tests {
         assert!(!app.session.notices.iter().any(|n| n.text.contains("Download offered")));
         assert!(!app.download("archive.pmtiles", vec![1, 2, 3]));
         assert!(app.session.notices.iter().any(|n| n.error && n.text.contains("browser rejected download")));
-        assert!(!app.session.notices.iter().any(|n| n.text.contains("Downloaded")));
+        assert!(!app.session.notices.iter().any(|n| n.text.contains("Download offered")));
     }
 
     /// The web download encodes the filtered rows and reports the count once the bytes are accepted.
@@ -8911,6 +8992,26 @@ mod download_service_tests {
 #[cfg(test)]
 mod peer_output_tests {
     use super::*;
+
+    /// Completed rankings belong to the replaced project, through User and peer entry points.
+    #[test]
+    fn project_replacement_clears_similar_output() {
+        for peer in [false, true] {
+            let mut app = RustGisApp::new(Session::new(Project::default()));
+            app.workflow.section = "similar";
+            app.workflow.result = Some(json!({"similar":[{"row":1,"distance":0.5}]}));
+            app.workflow.error = Some("old project error".into());
+            assert!(app.open_peer_text("invalid project").is_err());
+            assert!(app.workflow.result.is_some() && app.workflow.error.is_some(), "a refused replacement keeps current output");
+            if peer {
+                let (text, _) = Project::default().saved_text(None).unwrap();
+                app.open_peer_text(&text).unwrap();
+            } else {
+                app.run("project.new", json!({})).unwrap();
+            }
+            assert!(app.workflow.result.is_none() && app.workflow.error.is_none(), "a replacement cannot show old row indices");
+        }
+    }
 
     /// Drives the actual receiving wrapper, including the UI state a direct Session call misses.
     #[test]

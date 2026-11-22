@@ -43,8 +43,8 @@ is out of scope.
 - A new background raster command or export, or a tool whose work grows with its input, goes in
   the lists in `long_commands` (`crates/engine/src/tests/cancellation.rs`), which both cancel tests
   run; the raster and export lists must match the background registries. A read-ahead command
-  (`reads::prepare`, such as `service.layers` or `edit.previewShapeConversion`) has no registry:
-  add its call to `long_commands` by hand.
+  goes in `reads::IN_BACKGROUND` (a table edit in `edit::TABLE_EDITS`), and `long_commands`
+  fails until it runs every one there or names why not in its exemptions.
   `long_commands_stop_when_cancelled_while_they_run` fails one that never looks at Cancel;
   `cancelling_at_each_check_leaves_nothing_behind` cancels at every check in turn until the command
   finishes before reaching it, on small fixtures, failing if one needs 256 or more checks. It
@@ -90,6 +90,11 @@ measures.
 - **Everything is a command**: a `CommandSpec` in `crates/engine/src/cmd/*.rs`. UI-only
   commands (`ui.*`) live in `crates/ui-egui/src/lib.rs`. The ribbon, shortcuts, command search
   and CLI dispatch by id. Commands never open dialogs.
+- **`.view()` leaves the layers as they are**: a command that adds, removes or reorders layers
+  mutates, even when it fails part way. Declared `.view()`, it leaves no Undo step when it runs by
+  itself. Only Undo, Redo (`Effect::History`) and a project replaced (`Effect::Replaces`) may.
+  The engine's unit and integration tests fail a registered command declared wrong (the check in
+  `invoke`, `policy/dispatch.rs`, feature `declaration-check`), but only on the paths they run.
 - **Command ingress**: root `Session::run` is trusted native User dispatch. Assistant, MCP,
   plugin, imported-item and continuation adapters carry their named opaque policy scope;
   scopes inherit or narrow, and `with_scope` rejects nested ingress. Peer project text uses
@@ -156,7 +161,8 @@ It counts only the libraries and programs built for the host, not tests, example
 built only for other targets, nor a row indexed without reading a field (`features[i]` alone); use
 the accessors there too.
 While you work, `cargo xtask changed` runs the same checks on only the packages your branch changes
-and those that depend on them (and `test-hygiene` on the whole workspace), or everything when a
+and those that depend on them (and `test-hygiene` on the whole workspace, and formatting, `layers` and
+`rows` when packages are checked), or everything when a
 changed file such as `Cargo.lock` is outside every package and nothing includes it.
 A new dependency must have a licence `deny.toml` allows (CI runs `cargo deny check licenses`); after
 changing dependencies, run `cargo xtask notices` to refresh the `THIRD-PARTY-LICENSES.txt` files the
@@ -174,6 +180,10 @@ immediately; label-gated build jobs in `ci.yml` start from the next push.
   wait for the **release quality pass**, where maintainers handle them together before each
   release. Reply that it's left for the release quality pass, end the reply with
   `<!-- quality-sweep -->`, and leave it out of the next push.
+- The Claude review ends each inline finding with its category (a last line such as `Category: bug`).
+  CI's `Review deferrals` job fails, on each push and in the merge queue, when the marker answers
+  a `bug`, `security` or `agents-md` finding, or one edited since it was posted. A maintainer
+  overrides it for one finding by ending a reply in its thread with `<!-- deferral-approved -->`.
 
 ## Looking at the app
 - `cargo run --release -p rustgis` (opens the World Atlas sample).

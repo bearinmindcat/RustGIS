@@ -340,8 +340,9 @@ pub struct MapView {
     pictures: crate::popupmedia::Pictures,
     /// The tile layers' credits, from the last render.
     attribution: Vec<String>,
-    /// Tile layer errors, and why layers were drawn without their cast shadows (in the map or
-    /// the Layout view), already reported.
+    /// Tile layer errors (by kind, see [`say_tile_error`]), why layers were drawn without their
+    /// cast shadows (in the map or the Layout view), and what frames approximated, already
+    /// reported.
     pub(crate) tile_errors: std::collections::HashSet<String>,
     /// When the map last rendered (seconds).
     last_render: f64,
@@ -512,7 +513,11 @@ impl MapView {
             self.attribution.clear();
             self.tile_errors.clear();
             self.drape = Default::default();
+            // With their relays: what the old project's frames approximated on workers isn't the
+            // new one's.
             self.tilt_drape = Default::default();
+            self.tilt_settle.relay = Default::default();
+            self.motion_frame.relay = Default::default();
             self.filling = false;
         }
         self.project = Some(opened);
@@ -1549,9 +1554,7 @@ fn main_view(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         let (live_frame, live_pending) = match gf.live_frame(if picture { app.map.tex_camera } else { cam }) {
             Some((mut f, pending, declined)) => {
                 for error in f.tile_errors.drain(..) {
-                    if app.map.tile_errors.insert(error.clone()) {
-                        app.session.notify(error, true);
-                    }
+                    say_tile_error(&mut app.map.tile_errors, &mut app.session, error);
                 }
                 // A layer no longer drawn live (its style turned out to draw more than raster
                 // tiles): the map is drawn again, as tiles arriving would draw it.
@@ -1766,10 +1769,9 @@ fn show_gpu_frame(
     app.map.attribution = scene.attribution;
     app.map.last_render = time;
     for e in scene.tile_errors {
-        if app.map.tile_errors.insert(e.clone()) {
-            app.session.notify(e, true);
-        }
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, e);
     }
+    say_approximations(app);
     app.map.tex_camera = cam;
     app.map.tex_size = (view.width, view.height);
     app.map.key = Some(key);
@@ -1828,13 +1830,65 @@ fn show_frame(
     app.map.attribution = r.attribution;
     app.map.last_render = time;
     for e in r.tile_errors {
-        if app.map.tile_errors.insert(e.clone()) {
-            app.session.notify(e, true);
-        }
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, e);
     }
+    say_approximations(app);
     app.map.tex_camera = cam;
     app.map.tex_size = (view.width, view.height);
     app.map.key = Some(key);
+}
+
+/// Says a tile layer's error ("{layer}: {why}", its kinds joined by "; ") once a project for each
+/// layer and kind of error, each kind a notice of its own: the count of tiles in the view a kind
+/// may carry ("12 tiles left out: …") changes with every pan or zoom, so it is said under its kind
+/// ([`tile_error_kind`]), with the count it had then, rather than again for each new count.
+/// Another kind of error, or another layer's, is said all the same. `said` is the map view's
+/// [`MapView::tile_errors`].
+pub(crate) fn say_tile_error(said: &mut std::collections::HashSet<String>, session: &mut rustgis_engine::Session, error: String) {
+    let (layer, why) = error.split_once(": ").map_or(("", error.as_str()), |(l, w)| (l, w));
+    for kind in why.split("; ") {
+        let notice = if layer.is_empty() { kind.to_string() } else { format!("{layer}: {kind}") };
+        // The layer's name as it is: only the reason loses its counts.
+        if said.insert(format!("{layer}\0{}", tile_error_kind(kind))) {
+            session.notify(notice, true);
+        }
+    }
+}
+
+/// Tile error reason `e` without its counts of tiles ("12 tiles left out", "3 tiles are partial",
+/// "2 warped tile components left out" each become `#`): what it says beside them, the layer and
+/// the reason, is its kind.
+fn tile_error_kind(e: &str) -> String {
+    let mut out = String::with_capacity(e.len());
+    let mut rest = e;
+    while let Some(i) = rest.find(|c: char| c.is_ascii_digit()) {
+        let (head, tail) = rest.split_at(i);
+        out.push_str(head);
+        let n = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+        let (digits, after) = tail.split_at(n);
+        let starts_word = !out.ends_with(|c: char| c.is_alphanumeric() || c == '.' || c == ',');
+        if starts_word && (after.starts_with(" tiles ") || after.starts_with(" warped tile")) {
+            out.push('#');
+        } else {
+            out.push_str(digits);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Says, once a project each, what the map view's frames drew otherwise than their layers ask
+/// (a dashed line drawn solid, a fill left off a block diagram's walls, see
+/// [`rustgis_engine::render::take_approximations`]), each kind with the count it had when first
+/// seen: read after each frame it shows, with what its workers' frames handed over.
+fn say_approximations(app: &mut RustGisApp) {
+    let relays = [&app.map.tilt_settle.relay, &app.map.motion_frame.relay, &app.map.tilt_drape.relay];
+    for (kind, e) in rustgis_engine::render::take_approximations(&relays) {
+        if app.map.tile_errors.insert(format!("approximated\0{kind}")) {
+            app.session.warn(e);
+        }
+    }
 }
 
 /// How much wider and taller than the view a frame drawn mid-motion to fill a gap is, so the
@@ -4431,7 +4485,7 @@ fn select_shown(app: &mut RustGisApp) {
     if let Some((id, row)) = found {
         rustgis_engine::cmd::select::set(&mut app.session, id, vec![row], rustgis_engine::cmd::select::Mode::New);
     } else {
-        app.session.map_mut().clear_selection();
+        rustgis_engine::cmd::select::clear(&mut app.session);
     }
     app.session.revision = app.session.revision.wrapping_add(1);
 }
@@ -4928,6 +4982,64 @@ mod tile_redraw_tests {
         }
     }
 
+    /// A tile layer's error whose count of tiles changes as the view moves is said once for the
+    /// layer and kind; another kind or another layer's is said all the same (#2639).
+    #[test]
+    fn tile_errors_are_said_once_a_layer_and_kind_whatever_their_counts() {
+        use super::{say_tile_error, tile_error_kind};
+        assert_eq!(tile_error_kind("Tiles: 12 tiles left out: refused"), "Tiles: # tiles left out: refused");
+        assert_eq!(tile_error_kind("Tiles: 3 tiles are partial (first: HTTP 404)"), "Tiles: # tiles are partial (first: HTTP 404)");
+        assert_eq!(tile_error_kind("Layer 12: 2 warped tile components left out: x"), "Layer 12: # warped tile components left out: x");
+        assert_eq!(tile_error_kind("Tiles: missing source"), "Tiles: missing source");
+        let mut app = crate::RustGisApp::with_sample();
+        let said = |app: &crate::RustGisApp, mark| app.session.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>();
+        let mark = app.session.notice_mark();
+        for n in [12, 7, 30, 12] {
+            say_tile_error(&mut app.map.tile_errors, &mut app.session, format!("Tiles: {n} tiles left out: refused"));
+        }
+        assert_eq!(said(&app, mark), ["Tiles: 12 tiles left out: refused"]);
+        // A new reason, and another layer's, are new.
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, "Tiles: 4 tiles left out: HTTP 500".into());
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, "Roads: 4 tiles left out: refused".into());
+        assert_eq!(said(&app, mark).len(), 3, "{:?}", said(&app, mark));
+        // A layer's kinds joined in one error are each said once, under the layer.
+        let mark = app.session.notice_mark();
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, "Tiles: 9 tiles left out: refused; sprite left out".into());
+        assert_eq!(said(&app, mark), ["Tiles: sprite left out"]);
+        // Layers whose names hold what a count looks like stay apart.
+        let mark = app.session.notice_mark();
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, "2024 tiles west: missing source".into());
+        say_tile_error(&mut app.map.tile_errors, &mut app.session, "2025 tiles west: missing source".into());
+        assert_eq!(said(&app, mark).len(), 2);
+    }
+
+    /// What the map view's frames approximated is said once a project each (#2639).
+    #[test]
+    fn approximations_are_said_once_a_project() {
+        let mut app = crate::RustGisApp::with_sample();
+        rustgis_engine::render::take_approximations(&[]);
+        let mark = app.session.notice_mark();
+        super::say_approximations(&mut app);
+        assert!(!app.session.notices_since(mark).iter().any(|n| n.text.starts_with("road: ")), "nothing approximated, nothing said");
+        use rustgis_engine::data::{Dataset, Geometry, GeometryType};
+        use rustgis_engine::geom::Coord;
+        use rustgis_engine::map::{Basemap, Camera, LineStroke, Map, symbology::Dash};
+        let mut m = Map::new("Map");
+        m.basemap = Basemap::Blank;
+        let mut d = Dataset::new("road", GeometryType::Polyline, vec![]);
+        d.push(Some(Geometry::Line(vec![vec![Coord::new(-1.0, 0.0), Coord::new(1.0, 0.0)]])), vec![]);
+        let id = m.add_dataset(d);
+        m.layer_mut(id).unwrap().line_strokes = vec![LineStroke { dash: Dash::new(&[0.2, 0.2]), width: Some(4.0), ..Default::default() }];
+        let camera = Camera { center: rustgis_engine::geom::lonlat_to_merc(Coord::new(0.0, 0.0)), res: 1500.0, bearing: 0.0, pitch: 0.0 };
+        let view = rustgis_engine::render::View { width: 200.0, height: 200.0, pixels_per_point: 1.0, camera, sky: false };
+        for _ in 0..2 {
+            rustgis_engine::render::render(&mut m, &view).unwrap();
+            super::say_approximations(&mut app);
+        }
+        let said: Vec<_> = app.session.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.starts_with("road: ")).collect();
+        assert!(said.len() == 1 && said[0].starts_with("road: 1 dashed line(s) drawn solid"), "{said:?}");
+    }
+
     #[test]
     fn tiles_arriving_are_held_briefly_after_a_frame() {
         // Shown a moment ago: the new tiles wait; a while ago, they are drawn.
@@ -5416,6 +5528,58 @@ mod tests {
             pp.info["results"].as_array().unwrap().iter().map(|r| r["tileLayer"].as_str().or(r["layer"].as_str()).unwrap()).collect();
         assert_eq!((shown, pp.index), (vec!["Over", "Countries"], 0));
         assert!(app.session.map().layer_by_name("Countries").unwrap().selection.is_empty());
+    }
+
+    /// Browsing to a service result clears vector selection without an Undo step. A Similar
+    /// read prepared before that actual pop-up gesture must not replace the user's clear.
+    #[test]
+    fn popup_clear_preserves_selection_intent_against_pending_similar() {
+        use egui_kittest::kittest::Queryable;
+        use rustgis_engine::analysis::control::Control;
+        use rustgis_engine::cmd::reads::{read_ahead, read_land};
+        use rustgis_engine::data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as Cell};
+        let mut s = rustgis_engine::Session::new(rustgis_engine::Project::default());
+        let mut data = Dataset::new("values", GeometryType::Point, vec![Field::new("n", FieldType::Integer)]);
+        for n in [0, 2, 10] {
+            data.push(Some(Geometry::Point(Coord::new(n as f64, 0.0))), vec![Cell::Int(n)]);
+        }
+        let id = rustgis_engine::cmd::layer::add_dataset(&mut s, data);
+        let fid = s.map().layer(id).unwrap().dataset.features[0].id;
+        let url = "https://wms.example.org/?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=over&STYLES=&CRS=EPSG:3857&BBOX={bbox-epsg-3857}&WIDTH=256&HEIGHT=256&FORMAT=image%2Fpng";
+        s.run("map.addTiles", &json!({"url":url,"name":"Remote","overlay":true})).unwrap();
+        s.run("select.rows", &json!({"layer":id,"rows":[0]})).unwrap();
+        let pending = read_ahead(&mut s, "data.similar", &json!({"layer":id,"row":0,"fields":["n"],"count":1})).unwrap();
+        let depth = s.undo_depth();
+        let first = json!({"layerId":id,"fid":fid,"layer":"values","attributes":{"name":"Reference"}});
+        let mut info = first.clone();
+        info["results"] = json!([first,{"tileLayer":"Remote","attributes":{"name":"Remote feature"}}]);
+        let pp = Popup::new(info, Coord::new(0.0, 0.0), s.project.active_map, s.opened);
+        let mut app = RustGisApp::new(s);
+        app.map.popup = Some(pp);
+        let mut fonts = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
+            move |ui, app: &mut RustGisApp| {
+                if !fonts {
+                    crate::theme::install_fonts(ui.ctx(), &[], None);
+                    fonts = true;
+                    return;
+                }
+                let rect = ui.max_rect();
+                popup(app, ui, rect);
+            },
+            app,
+        );
+        h.run();
+        h.get_by_role_and_label(egui::accesskit::Role::Button, "›").click();
+        h.run();
+        assert_eq!(h.state().map.popup.as_ref().unwrap().index, 1);
+        assert!(h.state().session.map().layer(id).unwrap().selection.is_empty());
+        assert_eq!(h.state().session.undo_depth(), depth, "pop-up browsing creates no Undo step");
+        let mark = h.state().session.notice_mark();
+        let answer = read_land(&mut h.state_mut().session, pending.run(&Control::stoppable()).unwrap()).unwrap();
+        assert_eq!(answer["similar"][0]["row"], 1);
+        assert!(h.state().session.map().layer(id).unwrap().selection.is_empty(), "the pending read must preserve the pop-up clear");
+        assert!(h.state().session.notices_since(mark).iter().any(|n| n.text.contains("without replacing the current selection")));
     }
 
     /// A WMS layer's answer comes in the drawing order (#808): drawn over Countries, its feature

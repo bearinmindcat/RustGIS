@@ -58,9 +58,11 @@ pub struct Exported {
     /// Per field of the layer, text values `<Null>` the source read as null
     /// ([`crate::source::Batch::null_text`], said by [`crate::source::null_text_note`]).
     pub null_text: Vec<usize>,
-    /// Per field of the layer, text values the source read as UTF-8 that aren't UTF-8
+    /// Per field of the layer, text values that aren't valid in the encoding the source read them in
     /// ([`crate::source::Batch::not_utf8`], said by [`crate::source::not_utf8_note`]).
     pub not_utf8: Vec<usize>,
+    /// The encoding `not_utf8` is of ([`crate::source::FeatureSource::text_encoding`]).
+    pub not_utf8_in: &'static str,
     /// Per field of the layer, date-times a GeoPackage holds in UTC rather than at their own
     /// offset ([`crate::io::offset_dates`]; empty for the other formats).
     pub utc_dates: Vec<usize>,
@@ -103,18 +105,8 @@ pub fn write_source_in(src: &dyn FeatureSource, layer: &Dataset, path: &Path, cr
 }
 
 /// As [`write_source_in`], a GeoPackage's table placed as `gpkg` says (see
-/// [`crate::io::write_path_to`]): also returns the table written.
-pub fn write_source_to(
-    src: &dyn FeatureSource,
-    layer: &Dataset,
-    path: &Path,
-    crs: Crs,
-    gpkg: &GpkgTable,
-) -> Result<(Exported, Option<GpkgWritten>)> {
-    write_chunks_to(src, layer, path, crs, gpkg, CHUNK_BYTES, None)
-}
-
-/// As [`write_source_to`], applying the layer's query before projecting or serializing each chunk.
+/// [`crate::io::write_path_to`]), applying the layer's query before projecting or serializing each
+/// chunk: also returns the table written.
 pub fn write_source_filtered(
     src: &dyn FeatureSource,
     layer: &Dataset,
@@ -134,7 +126,7 @@ fn write_chunks_in(src: &dyn FeatureSource, layer: &Dataset, path: &Path, crs: C
     write_chunks_to(src, layer, path, crs, &GpkgTable::default(), bytes, None).map(|(e, _)| e)
 }
 
-/// [`write_source_to`], `bytes` of features a chunk.
+/// [`write_source_filtered`], `bytes` of features a chunk.
 fn write_chunks_to(
     src: &dyn FeatureSource,
     layer: &Dataset,
@@ -383,6 +375,7 @@ fn write_chunks_as(
             rounded_dates,
             null_text,
             not_utf8,
+            not_utf8_in: src.text_encoding(),
             utc_dates,
             fine_dates,
             written_values,

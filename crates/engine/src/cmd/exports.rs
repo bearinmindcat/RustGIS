@@ -135,7 +135,7 @@ fn said(s: &mut Session, wrote: Wrote) -> CmdResult {
     }
     for note in notes {
         if written_path.is_some() {
-            s.notify_written(note, false);
+            s.notify_written(note);
         } else {
             s.notify(note, false);
         }
@@ -179,18 +179,13 @@ pub(crate) fn drawn(
         }
     }
     if written.is_ok() {
-        let listed = |v: &[String]| {
-            let more = v.len().saturating_sub(10);
-            let shown = v.iter().take(10).cloned().collect::<Vec<_>>().join("; ");
-            if more > 0 { format!("{shown}; and {more} more") } else { shown }
-        };
         let warn = rustgis_data::diagnostics::Severity::Warning;
         if unplaced > 0 {
             notices.push((
                 warn,
                 format!(
                     "{path}: {unplaced} feature(s) have a place that can't be given in longitude/latitude, drawn without it ({})",
-                    listed(&partly)
+                    crate::listed(&partly)
                 ),
             ));
         }
@@ -200,7 +195,7 @@ pub(crate) fn drawn(
                 format!(
                     "{path}: {} layer(s) aren't drawn, as their system can't be given in longitude/latitude: {}",
                     undrawn.len(),
-                    listed(&undrawn)
+                    crate::listed(&undrawn)
                 ),
             ));
         }
@@ -261,7 +256,7 @@ pub(crate) fn drawn(
         // already reported above retain their screen markers, so this cannot duplicate them.
         s.notice_landed_pixels();
         written?;
-        s.notify_written(format!("Exported {path}"), false);
+        s.notify_written(format!("Exported {path}"));
         Ok(())
     });
     Ok(Wrote {
@@ -410,6 +405,15 @@ pub(crate) fn export_start_raw(s: &mut Session, op: crate::policy::Authorized<cr
 /// its answer: the troubleshooting history files what it says (its failure too) under that
 /// command, and the session's log has its entry, as when it runs here.
 pub fn export_land(s: &mut Session, started: Started, done: Result<Wrote, String>) -> CmdResult {
+    let landed = export_land_floored(s, started, done);
+    // A landed export (a field package's) may record ids packages hold: kept as any command's are.
+    s.keep_field_floors();
+    landed
+}
+
+/// [`export_land`], before field packages' id floors are kept.
+#[cfg(not(target_arch = "wasm32"))]
+fn export_land_floored(s: &mut Session, started: Started, done: Result<Wrote, String>) -> CmdResult {
     let _inputs = s.log.on().then(rustgis_data::provenance::Capture::start);
     rustgis_data::provenance::record(started.inputs.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
     let Started { command, params, at, start, owner, project, .. } = started;

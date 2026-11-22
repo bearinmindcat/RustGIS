@@ -862,7 +862,8 @@ fn step_value(script: &str, at: usize, session: &rustgis_engine::Session) -> Opt
 /// What a `gp.run` line's tool takes for the value being typed in its `"params"` (#788), by the
 /// kind of the tool's parameter of that key, as the tool's form offers it (`takes_layer`,
 /// `takes_field`): the layers of its kind, then the tables for one that takes any layer; the
-/// fields it takes of the layer or table the tool's first layer parameter names (before or after
+/// fields it takes of the layer or table named by the parameter whose fields it lists (the
+/// input `fieldlists::input` gives for its kind, else `panes::layer_for_param`, before or after
 /// it); or its choices. None for another kind: a number, a bool, a path, a text, several layers in
 /// one string.
 fn tool_value(script: &str, at: usize, session: &rustgis_engine::Session) -> Option<Offer> {
@@ -1193,6 +1194,14 @@ pub struct Help {
     pub location: String,
 }
 
+impl Help {
+    /// What the help says, for a screen reader: the command's name and what it does (the
+    /// signature and parameters left out, as code to read).
+    fn spoken(&self) -> String {
+        crate::completion::spoken(&self.label, Some(&self.about))
+    }
+}
+
 /// The help for command `id`, as Command Search names and places it (translated); None for an id
 /// no command has.
 pub fn help(session: &rustgis_engine::Session, id: &str) -> Option<Help> {
@@ -1487,7 +1496,17 @@ pub fn show(
             }
         }
     };
-    let clicked = state.list.show(ui, box_id.with("complete_list"), out, visible, work, icon, draw);
+    // What the help says, for a screen reader (`List::show`): the same sources as `draw`.
+    let describe = |offer: &Offer, item: &str| match &offer.of {
+        Some(Of::ToolIds) => rustgis_engine::analysis::tool(item).map(|t| tool_help(t).spoken()),
+        None | Some(Of::CommandIds) => help(session, item).map(|h| h.spoken()),
+        Some(Of::Expression(e)) => {
+            let ds = e.data.as_ref().and_then(|of| data_of(session, of));
+            crate::exprcomplete::describe_item(&e.offer, item, ds)
+        }
+        Some(of) => item_help(session, of, item).map(|(text, about)| crate::completion::spoken(&text, about.as_deref())),
+    };
+    let clicked = state.list.show(ui, box_id.with("complete_list"), out, visible, work, icon, describe, draw);
     store(ui, box_id, state);
     clicked
 }
@@ -1771,6 +1790,31 @@ mod tests {
         h.run();
         assert_eq!(h.state().workflow.script, "labels.style {}", "with its parameters' braces");
         assert!(h.query_by_label("labels.style").is_none(), "the list closed");
+    }
+
+    /// The highlighted entry is the box's active descendant, with what its help says, as the
+    /// highlight moves (#2619): a command its name and what it does, a field in an expression its
+    /// type (as the expression box says it).
+    #[test]
+    fn a_screen_reader_reads_the_highlighted_entry() {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let read = |h: &egui_kittest::Harness<'_, crate::RustGisApp>| {
+            let node = h.get_by_role(egui::accesskit::Role::MultilineTextInput);
+            node.accesskit_node().active_descendant().map(|row| (row.label().unwrap_or_default(), row.description().unwrap_or_default()))
+        };
+        let mut h = pane();
+        type_in(&mut h, "labels.sty");
+        let (label, said) = read(&h).expect("a row named");
+        assert_eq!(label, "labels.style");
+        assert_eq!(said, super::help(&h.state().session, "labels.style").unwrap().spoken());
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert_eq!(read(&h), None, "closed: no row named");
+        let mut h = pane();
+        type_in(&mut h, r#"select.byAttributes {"layer": "Countries", "where": "\"pop_"#);
+        let (label, said) = read(&h).expect("a row named");
+        assert_eq!(label, "pop_est");
+        assert!(!said.is_empty(), "the field's type");
     }
 
     /// In an expression's string (#1240) the list holds the line's layer's fields, Enter puts the

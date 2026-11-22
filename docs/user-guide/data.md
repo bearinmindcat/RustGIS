@@ -15,7 +15,7 @@ Formats](data-formats.md).
 | FlatGeobuf (`.fgb`) | Yes | Yes (`share.exportLayer`) |
 | KML/KMZ (with their styles), GPX | Yes | Yes |
 | Spreadsheets (`.xlsx`, `.xls`, `.ods`), GeoRSS feeds, LandXML, encoded polylines | Yes | No |
-| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, CityJSON (footprints with heights), AutoCAD DXF (ASCII) | Yes | No |
+| GML, MapInfo MIF/MID, OpenStreetMap PBF, TopoJSON, CityJSON and CityGML (footprints with heights), AutoCAD DXF (ASCII) | Yes | No |
 | LiDAR point clouds: LAS, LAZ, COPC (an evenly spread sample) | Yes | No |
 | Geotagged photos (JPEG with EXIF GPS): points with their thumbnails | Yes | No |
 | Esri File Geodatabase (`.gdb` folder; 3D multipatches as footprints) | Yes (desktop) | No |
@@ -1780,8 +1780,10 @@ rotation, pixel- or node-registered) reads no coordinates, and the transform win
 the store also holds. It is the variable's own, or that of the nearest group above it (up to 64
 levels up) that gives one, taken with that group's `spatial:shape`, which must be the variable's map's. Its map
 dimensions are those `spatial:dimensions` names. `proj:code`, `proj:wkt2` or `proj:epsg` give
-the coordinate system, after the variable's own attributes and its grid mapping, and before a
-`spatial_ref` or `crs` array beside it. A variable opened by its own address doesn't see its
+the coordinate system. The first of these that gives one is used: the variable's own attributes
+(its own `proj:` keys among them), then its grid mapping's, then the `proj:wkt2`, `proj:code` or
+`proj:epsg` of the nearest group above it that sets any of them (only when the variable sets none:
+a value that can't be read, on the variable or a group, isn't passed over for one further up), then a `spatial_ref` or `crs` array beside it. A variable opened by its own address doesn't see its
 groups' attributes: open the store's address with `"variable"` instead.
 A web store whose root lists no arrays (a Zarr 3 root `zarr.json` with no consolidated metadata,
 or a Zarr 2 `.zgroup` with no `.zmetadata`) needs `"variable"`: its array, the groups above it,

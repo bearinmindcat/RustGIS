@@ -109,6 +109,9 @@ pub struct CommandSpec {
     /// Pure executor-owned resolution for commands whose inputs exceed the common layer selector.
     pub(crate) transition: Option<fn(&cmd::InputContext<'_>, &Value) -> Result<Option<cmd::Selection>, String>>,
     pub(crate) inputs: Option<fn(&cmd::InputContext<'_>, &Value) -> Result<cmd::Inputs, String>>,
+    /// As a step of another command, it is atomic: it runs in a [`Session::savepoint`], undone
+    /// whole when it fails, since a plugin may handle the error and go on.
+    pub(crate) atomic: bool,
 }
 
 fn always(_: &Session) -> Option<&'static str> {
@@ -147,7 +150,13 @@ impl CommandSpec {
             roles: None,
             inputs: None,
             transition: None,
+            atomic: false,
         }
+    }
+    /// See [`CommandSpec::atomic`].
+    pub(crate) const fn atomic(mut self) -> Self {
+        self.atomic = true;
+        self
     }
     /// Declares the effects reviewed for this command; omitted declarations fail closed.
     pub const fn effects(mut self, effects: policy::Effects) -> Self {
@@ -393,6 +402,13 @@ fn clip(s: &str, n: usize) -> String {
 /// The most layer names a notice lists (the rest counted), each cut to 80 characters: the notice
 /// stays well within what a notice keeps.
 const NAMES_SAID: usize = 5;
+
+/// The first ten of `v` for a notice, separated by `; `, then how many more.
+pub(crate) fn listed(v: &[String]) -> String {
+    let more = v.len().saturating_sub(10);
+    let shown = v.iter().take(10).cloned().collect::<Vec<_>>().join("; ");
+    if more > 0 { format!("{shown}; and {more} more") } else { shown }
+}
 
 /// Layer names for a notice: the first [`NAMES_SAID`], each clipped, and how many more.
 fn names_said(names: &[String]) -> String {
@@ -753,18 +769,21 @@ pub(crate) struct StepTally {
     pub(crate) edited: bool,
 }
 
-/// What a command that doesn't mutate can move of what undo restores: the history state
-/// (`edit.undo`), the project replaced (`project.new`), its file (`project.saveAs`), and the
-/// unsaved mark a write that changed layers leaves (Publish to Source). Measured before and after
-/// a shared step ([`Session::shared_step`]), not inferred from what the command may reach. The
-/// project's contents change only by commands that mutate, except its history log, where an
-/// export records itself as a log entry, not an edit, as when it runs by itself.
+/// What a step can move of what undo restores without saying so: the history state
+/// (`edit.undo`), the project replaced (`project.new`), its file (`project.saveAs`), the unsaved
+/// mark a write that changed layers leaves (Publish to Source), and which layers each map has,
+/// in what order, with the id its next layer takes. Measured before and after a shared step
+/// ([`Session::shared_step`]), not inferred from what the command may reach. The project's other
+/// contents (a layer's name, look or features) change only by commands that mutate, except its
+/// history log, where an export records itself as a log entry, not an edit, as when it runs by
+/// itself.
 #[derive(PartialEq, Eq)]
 struct Restored {
     state: u64,
     opened: u64,
     files: ProjectFiles,
     unsaved_marks: u64,
+    layers: Vec<rustgis_map::LayerMark>,
 }
 
 pub struct Session {
@@ -829,6 +848,16 @@ pub struct Session {
     pub registry: Registry,
     /// Bumped on every change so views can cache.
     pub revision: u64,
+    /// The latest external selection admission, including changes on other layers. Mutations
+    /// conservatively record intent too; an older replay cannot advance it past newer intent.
+    pub(crate) selection_intent: u64,
+    /// External selection intent and Similar requests share one admission sequence.
+    pub(crate) selection_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// A prepared script/model's admission and its inner Similar request sequence.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) selection_admission: Option<(u64, std::sync::Arc<std::sync::atomic::AtomicU64>)>,
+    /// The last Similar request that applied selection here, independently of external intent.
+    pub(crate) similar_selected: (u64, u64),
     /// Bumped each time another project replaces this one (new, open, sample, template), however
     /// the command came (the app, an agent, a script): the interface drops what it kept for the
     /// old one.
@@ -1323,6 +1352,16 @@ pub(crate) fn edits_features(id: &str) -> bool {
 }
 
 impl Session {
+    /// Attributes replayed selection effects to their initiating script/model. Ordinary
+    /// synchronous actions take a fresh admission, so later user intent wins over queued work.
+    pub(crate) fn selection_epoch(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((epoch, _)) = &self.selection_admission {
+            return *epoch;
+        }
+        self.selection_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_add(1)
+    }
+
     /// Marks this thread as the desktop window owner for column statistics and shape fitting. Adapters with a
     /// window use the prepared read queue; headless adapters leave this disabled.
     #[cfg(not(target_arch = "wasm32"))]
@@ -1330,6 +1369,29 @@ impl Session {
         self.statistics_window_thread = enabled.then(|| std::thread::current().id());
     }
 
+    /// Keeps the ids new features are given above those field packages hold, in every layer they
+    /// apply to ([`Project::keep_field_floors`]). Run when a project is opened, after every command
+    /// wherever it runs (`invoke`: run, landed from a copy or a read, or a line of a script or task),
+    /// after an export lands, and after Undo and Redo: a floor lives with a layer's rows, which a
+    /// reload, a renewal or a restored snapshot replaces.
+    pub(crate) fn keep_field_floors(&mut self) {
+        self.project.keep_field_floors();
+    }
+
+    /// Whether the open field package's rows are waiting to be kept on this device
+    /// (`offline.keepRows`), as opening a package from home asks.
+    pub fn field_rows_waiting(&self) -> bool {
+        self.project.given.is_some()
+    }
+
+    /// Lets go of the open field package's rows waiting to be kept, when they can't be: the rows
+    /// they share with the project are then no longer held for them.
+    pub fn forget_field_rows(&mut self) {
+        self.project.given = None;
+    }
+
+    /// Starts an independent session with fresh runtime selection intent and request order.
+    /// Prepared script copies explicitly share request order with their originating session.
     pub fn new(mut project: Project) -> Self {
         // The engine's tests never add Shapefile indexes to the user's cache (#1230).
         #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -1369,6 +1431,11 @@ impl Session {
             layout_arrangements: serde_json::Map::new(),
             registry: Registry { commands: cmd::all() },
             revision: 1,
+            selection_intent: 0,
+            selection_sequence: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            selection_admission: None,
+            similar_selected: (0, 0),
             opened: 0,
             exchange: None,
             tool: Tool::Explore,
@@ -1513,6 +1580,8 @@ impl Session {
         for text in label_notices {
             session.notify_text(text, false);
         }
+        // A project opened: its layers keep new ids above those field packages hold.
+        session.keep_field_floors();
         session
     }
 
@@ -2203,35 +2272,36 @@ impl Session {
         self.guarded_inner(label, true, false, f)
     }
 
-    /// Runs `run`, the command `spec`, as a step of the command running now, in its transaction
-    /// (a script's line, a task's step, a plugin's call): it takes no undo step of its own, and
-    /// what it did goes into [`Session::shared_steps`]. Whether it left a request or changed
-    /// nothing ([`Session::request_only`]) is its own, never the enclosing command's. It edited
-    /// when it mutated and didn't say it changed nothing, or when [`Restored`] moved: a failed
-    /// step that kept a record (a failure note, a source file written) moved the history state.
+    /// Runs `run`, the command `spec`, as a step of the command running now (a script's line, a
+    /// task's step, a plugin's call), in its transaction or, for an [atomic](CommandSpec::atomic)
+    /// command, in a [`Session::savepoint`] of it. It takes no undo step of its own, and what it
+    /// did goes into [`Session::shared_steps`].
+    /// Whether it left a request or changed nothing ([`Session::request_only`]) is its own, never
+    /// the enclosing command's. It edited when it mutates and didn't say it changed nothing, or
+    /// when [`Restored`] moved. A failed step that mutates counts too unless a savepoint undid it:
+    /// telling what it changed would cost a copy of each layer it touched.
     pub(crate) fn shared_step(&mut self, spec: &CommandSpec, run: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
         let outer = std::mem::take(&mut self.request_only);
-        let before = self.restored();
-        #[cfg(debug_assertions)]
-        let layers = (!spec.mutates).then(|| self.project.maps.iter().map(Map::layer_mark).collect::<Vec<_>>());
-        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        // Once the account holds an edit, nothing a step does changes it: no need to measure.
+        let before = (!self.shared_steps.edited).then(|| self.restored());
+        let step = |s: &mut Session| if spec.atomic { s.savepoint(spec.label, run) } else { run(s) };
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(self)));
         let unchanged = std::mem::replace(&mut self.request_only, outer);
-        let moved = self.restored() != before;
-        // A command that doesn't mutate leaves the layers alone, or the measure above misses it.
-        #[cfg(debug_assertions)]
-        debug_assert!(
-            moved || res.is_err() || layers.is_none_or(|layers| self.project.maps.iter().map(Map::layer_mark).eq(layers)),
-            "{} doesn't mutate but changed the layers",
-            spec.id
-        );
-        // A failed step counts too: in a shared transaction nothing undoes what it did part way.
+        let moved = before.is_some_and(|before| self.restored() != before);
+        let kept = !spec.atomic || matches!(res, Ok(Ok(_)));
         self.shared_steps.requested |= unchanged;
-        self.shared_steps.edited |= moved || (spec.mutates && !unchanged);
+        self.shared_steps.edited |= moved || (spec.mutates && kept && !unchanged);
         res.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
     fn restored(&self) -> Restored {
-        Restored { state: self.state, opened: self.opened, files: self.project_files(), unsaved_marks: self.unsaved_marks }
+        Restored {
+            state: self.state,
+            opened: self.opened,
+            files: self.project_files(),
+            unsaved_marks: self.unsaved_marks,
+            layers: self.project.maps.iter().map(Map::layer_mark).collect(),
+        }
     }
 
     fn project_files(&self) -> ProjectFiles {
@@ -2700,7 +2770,7 @@ impl Session {
                 }
                 if let Some(note) = layer.source.as_mut().and_then(|source| source.take_not_utf8()) {
                     not_utf8.push(notice_text::NoticeText::format(
-                        "{name}: some text values in it aren't valid UTF-8 (Load All Features counts them all); so far, {note}",
+                        "{name}: so far, {note} (Load All Features counts them all)",
                         [("name", layer.name.clone().into()), ("note", note.into())],
                     ));
                 }
@@ -2839,9 +2909,8 @@ impl Session {
     /// Says once a session that native HTTPS trusts the bundled Mozilla roots, as a Linux or BSD
     /// system with no CA certificates and no `SSL_CERT_FILE` or `SSL_CERT_DIR` makes it
     /// ([`rustgis_data::http::bundled_roots`]): the trust source was assumed, not the system's.
-    /// Checked after each command and each frame, as the clients are first made when a request is.
-    /// Says, once a session, that native HTTPS fell back to the bundled CA roots, if it did. Run
-    /// with [`Session::notice_landed_rasters`]; a reader of the notices that runs no command (the
+    /// Checked after each command and each frame (with [`Session::notice_landed_rasters`]), as the
+    /// clients are first made when a request is; a reader of the notices that runs no command (the
     /// Python package) calls it first, as a client made on a background thread chooses the trust.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn notice_trust(&mut self) {
@@ -2943,9 +3012,9 @@ impl Session {
     /// A notice about a file or database write that has committed, not a pending delivery or
     /// an in-memory edit. It follows the ordinary redaction, bounds and diagnostics path, but
     /// survives a later enclosing command's rollback.
-    pub(crate) fn notify_written(&mut self, text: impl Into<String>, error: bool) {
+    pub(crate) fn notify_written(&mut self, text: impl Into<String>) {
         let mark = self.notice_mark();
-        self.notify(text, error);
+        self.notify(text, false);
         self.retain_written_notices(mark);
     }
 
@@ -3229,11 +3298,6 @@ impl Session {
         }
         // Layers gone are forgotten, so the map stays as small as the project.
         self.unplaced_checked.retain(|id, _| seen.contains(id));
-        let listed = |v: &[String]| {
-            let more = v.len().saturating_sub(10);
-            let shown = v.iter().take(10).cloned().collect::<Vec<_>>().join("; ");
-            if more > 0 { format!("{shown}; and {more} more") } else { shown }
-        };
         if features > 0 {
             let text = format!(
                 "{features} feature(s) have a place that can't be given in longitude/latitude: the map and the globe draw them without it, and labels' lines, block diagrams and terrain water leave them out ({})",
@@ -3550,6 +3614,8 @@ impl Session {
             std::mem::swap(&mut self.opened_package, &mut files.opened_package);
         }
         self.project.keep_table_ids(&cur);
+        self.project.keep_field_ids(&cur);
+        self.keep_field_floors();
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
@@ -3590,6 +3656,8 @@ impl Session {
             std::mem::swap(&mut self.opened_package, &mut files.opened_package);
         }
         self.project.keep_table_ids(&cur);
+        self.project.keep_field_ids(&cur);
+        self.keep_field_floors();
         self.reopen_layout(open, saved);
         self.keep_time_position(&cur);
         self.keep_tile_pick(&cur);
