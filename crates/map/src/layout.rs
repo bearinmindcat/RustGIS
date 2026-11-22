@@ -2752,6 +2752,9 @@ pub fn frame_camera(map: &Map, center: Coord, scale: f64, bearing: f64, pitch: f
     let mut cam = Camera { bearing: crate::camera::normalize_bearing(bearing), pitch: crate::camera::normalize_pitch(pitch), ..map.camera };
     // The centre where the map's projection places it: a pole itself on a polar map. Where it
     // can't (a pole on Web Mercator, at infinity), 85° of latitude, as frames always were (#2684).
+    // A longitude past a view's reach (±270° on Web Mercator) is the same meridian a turn of the
+    // globe nearer: the frame shows the same place, not one moved to the view's edge (#2711).
+    let center = if center.x.abs() > 270.0 { Coord::new((center.x + 180.0).rem_euclid(360.0) - 180.0, center.y) } else { center };
     let at = if frame_center_placed(map, center) { center } else { Coord::new(center.x, center.y.clamp(-85.0, 85.0)) };
     if let Some(c) = map.to_map(at) {
         cam.center = c;
@@ -3842,6 +3845,12 @@ mod tests {
         assert!(!frame_center_placed(&merc, south) && frame_center_placed(&merc, Coord::new(0.0, -85.0)));
         // A longitude past ±180° (the sanitizer keeps up to ±540°) is placed: only the latitude counts.
         assert!(frame_center_placed(&merc, Coord::new(300.0, 40.0)) && frame_center_placed(&merc, Coord::new(-500.0, -60.0)));
+        // And drawn there: the same meridian a turn of the globe nearer, not the view's edge at 270°.
+        for (lon, lat) in [(300.0, 40.0), (-500.0, -60.0)] {
+            let at = merc.to_lonlat(frame_camera(&merc, Coord::new(lon, lat), 60_000_000.0, 0.0, 0.0).center).unwrap();
+            let turns = (at.x - lon).rem_euclid(360.0);
+            assert!((turns < 1e-6 || turns > 360.0 - 1e-6) && (at.y - lat).abs() < 1e-6, "({lon}, {lat}) drawn at {at:?}");
+        }
         let cam = frame_camera(&merc, south, 60_000_000.0, 0.0, 0.0);
         let at = merc.to_lonlat(cam.center).unwrap();
         assert!((at.y + 85.0).abs() < 1e-6, "{at:?}");
