@@ -3491,7 +3491,10 @@ fn colorbar(pm: &mut Canvas, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
         for (i, line) in lines.iter().take(drawn).enumerate() {
             text::text_at(pm, line, r.x(), top + tpx * (0.6 + 1.25 * i as f32), tpx, dark, true, text::Align::Left, false);
         }
-        top += tpx * (1.4 + 1.25 * drawn.saturating_sub(1) as f32);
+        // A title held back whole takes no room: the bar starts at the element's top.
+        if drawn > 0 {
+            top += tpx * (1.4 + 1.25 * (drawn - 1) as f32);
+        }
     }
     // Where each block or sample sits along the bar (0 low to 1 high), and the labels with theirs.
     let (blocks, labels): (Vec<Rgba>, Vec<(f32, String)>) = match scale {
@@ -7312,6 +7315,29 @@ Elaboração: RustGIS",
         assert!((26..36).any(coloured), "the bar under the title");
         assert!(!(44..50).any(coloured), "the bar ends above its labels, not at the element's bottom");
         assert!((40..50).any(dark), "its labels under it");
+    }
+
+    /// A colorbar too short for a line of title over its bar holds the title back, and the bar
+    /// then starts at the element's top, keeping its labels: a title not drawn takes no room
+    /// (#2638). Before, the bar was pushed down by the room of a line never drawn, and lost them.
+    #[test]
+    fn a_colorbar_whose_title_is_held_back_keeps_its_labels() {
+        let scale = ColorScale::Ramp { lo: 0.0, hi: 10.0, colors: vec![Rgba::rgb(220, 30, 30), Rgba::rgb(30, 30, 220)] };
+        let title = "Precipitação média mensal JAXA GSMaP (mm/mês), jan–mar 2025";
+        let bar =
+            Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
+        // 100 × 30 px, from y = 10 to 40: a line of title (16.8 px) and the bar's own room
+        // (19.8) don't both fit, so no line is drawn.
+        assert_eq!(colorbar_title_drawn(4, 10.0, 40.0 - colorbar_bar_room(1.0), COLORBAR_TITLE_PT as f32 * 1.33), 0);
+        let mut c = Canvas::new(300, 200).unwrap();
+        colorbar(&mut c, Rect::from_xywh(10.0, 10.0, 100.0, 30.0).unwrap(), &scale, &bar, 1.0);
+        let px = |x: u32, y: u32| c.pixmap().pixel(x, y);
+        let coloured =
+            |y: u32| (10..110).any(|x| px(x, y).is_some_and(|p| p.alpha() > 200 && p.green() < 90 && p.red().abs_diff(p.blue()) > 60));
+        let dark = |y: u32| (10..110).any(|x| px(x, y).is_some_and(|p| p.alpha() > 128 && p.red() < 120 && p.blue() < 120));
+        assert!((11..15).any(coloured), "the bar at the element's top");
+        assert!(!(35..40).any(coloured), "the bar ends above its labels");
+        assert!((30..40).any(dark), "its labels under it");
     }
 
     /// A colorbar's title lines are drawn only where the bar keeps its own room under them, the
