@@ -2527,7 +2527,9 @@ impl Layout {
                         *center = Coord::new(0.0, 0.0);
                     }
                     center.x = center.x.clamp(-540.0, 540.0);
-                    center.y = center.y.clamp(-85.0, 85.0);
+                    // A pole is a centre like any other on a polar map: the map's projection
+                    // decides where the frame is drawn ([`frame_camera`], #2684).
+                    center.y = center.y.clamp(-90.0, 90.0);
                     if let FrameShape::Polygon(p) = shape {
                         let points = p.len();
                         p.retain(|(u, v)| u.is_finite() && v.is_finite());
@@ -2748,13 +2750,28 @@ fn is_zero(v: &f64) -> bool {
 /// turned or tilted.
 pub fn frame_camera(map: &Map, center: Coord, scale: f64, bearing: f64, pitch: f64) -> Camera {
     let mut cam = Camera { bearing: crate::camera::normalize_bearing(bearing), pitch: crate::camera::normalize_pitch(pitch), ..map.camera };
-    if let Some(c) = map.to_map(center) {
+    // The centre where the map's projection places it: a pole itself on a polar map. Where it
+    // can't (a pole on Web Mercator, at infinity), 85° of latitude, as frames always were (#2684).
+    let at = if frame_center_placed(map, center) { center } else { Coord::new(center.x, center.y.clamp(-85.0, 85.0)) };
+    if let Some(c) = map.to_map(at) {
         cam.center = c;
     }
     let per = map.ground_per_unit(cam.center).max(1e-9);
     cam.res = scale * PAPER_M_PER_PT / per;
     cam.clamp();
     cam
+}
+
+/// Whether a frame centred on `center` (lon/lat) is drawn centred there on `map`: its projection
+/// places the point within a view's reach. A pole on Web Mercator isn't (it lies at infinity;
+/// [`frame_camera`] draws the frame at 85° instead); on a polar map it is (#2684).
+pub fn frame_center_placed(map: &Map, center: Coord) -> bool {
+    let lim = std::f64::consts::PI * rustgis_geom::MERCATOR_R;
+    // Placed, and placed there: Web Mercator's projection takes a pole to its edge at 85.05°, which
+    // reads back as that latitude, not the pole.
+    map.to_map(center).is_some_and(|m| {
+        m.x.abs() <= lim * 1.5 && m.y.abs() <= lim && map.to_lonlat(m).is_some_and(|back| (back.y - center.y).abs() < 1e-4)
+    })
 }
 
 /// The scale that fits a lon/lat extent into a frame `w_mm`×`h_mm` with a margin, and its centre.
@@ -3798,6 +3815,37 @@ mod tests {
         assert_eq!(ScaleUnits::Auto.resolve(0.05), (0.01, "cm"));
         assert_eq!(ScaleUnits::Auto.resolve(0.005), (0.001, "mm"));
         assert_eq!(ScaleUnits::Meters.resolve(0.005), (1.0, "m"), "a chosen unit stays");
+    }
+
+    /// A frame centred on a pole keeps that centre, and is drawn centred there on a polar map;
+    /// Web Mercator, whose poles are at infinity, draws it at 85° as frames always were, and
+    /// [`frame_center_placed`] tells it can't place it (#2684).
+    #[test]
+    fn a_frame_centred_on_a_pole_is_drawn_there_on_a_polar_map() {
+        let mut l = Layout::new("Polo", 150.0, 150.0);
+        let frame: ElementKind =
+            serde_json::from_value(serde_json::json!({"MapFrame":{"map":"Mapa", "center":{"x":0,"y":-90}, "scale":60000000.0}})).unwrap();
+        let id = l.add("Mapa", (5.0, 5.0, 140.0, 140.0), frame);
+        l.clamp();
+        let center = |l: &Layout| match l.element(id).map(|e| &e.kind) {
+            Some(ElementKind::MapFrame { center, .. }) => *center,
+            _ => panic!("no frame"),
+        };
+        assert_eq!(center(&l).y, -90.0, "the pole kept");
+        // On a south polar stereographic map, the pole is the frame's centre.
+        let mut polar = Map::new("Mapa");
+        polar.set_projection(crate::Projection::from_code("EPSG:3031").unwrap());
+        let south = Coord::new(0.0, -90.0);
+        assert!(frame_center_placed(&polar, south));
+        let cam = frame_camera(&polar, south, 60_000_000.0, 0.0, 0.0);
+        let pole = polar.to_map(south).unwrap();
+        assert!((cam.center.x - pole.x).abs() < 1e-3 && (cam.center.y - pole.y).abs() < 1e-3, "{:?} {pole:?}", cam.center);
+        // On Web Mercator it can't be: drawn at 85° S.
+        let merc = Map::new("Mapa");
+        assert!(!frame_center_placed(&merc, south) && frame_center_placed(&merc, Coord::new(0.0, -85.0)));
+        let cam = frame_camera(&merc, south, 60_000_000.0, 0.0, 0.0);
+        let at = merc.to_lonlat(cam.center).unwrap();
+        assert!((at.y + 85.0).abs() < 1e-6, "{at:?}");
     }
 
     #[test]

@@ -4996,7 +4996,8 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
         Some(c) => {
             let a = c.as_array().ok_or("center is [lon, lat]")?;
             match (a.first().and_then(Value::as_f64), a.get(1).and_then(Value::as_f64)) {
-                (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(Coord::new(x.clamp(-540.0, 540.0), y.clamp(-85.0, 85.0))),
+                // A pole too: the frame's map decides where it's drawn (#2684).
+                (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(Coord::new(x.clamp(-540.0, 540.0), y.clamp(-90.0, 90.0))),
                 _ => return Err("center is [lon, lat]".into()),
             }
         }
@@ -5534,6 +5535,13 @@ fn update(s: &mut Session, p: &Value) -> CmdResult {
     // After the scale box is refitted: a text is measured in the box it is saved with.
     if shown || TEXT_FIT_KEYS.iter().any(|k| p.get(*k).is_some_and(|v| !v.is_null())) || BAR_FIT_KEYS.iter().any(|k| p.get(*k).is_some()) {
         say_text_fit(s, li, id);
+    }
+    // A centre the frame's map can't place (a pole on Web Mercator) is said (#2684).
+    if new_center.is_some() || given(&["map"]) {
+        let said = s.project.layouts.get(li).and_then(|l| unplaced_center(s, l, id));
+        if let Some(said) = said {
+            s.notify(said, false);
+        }
     }
     say_held(s, "Element Properties", held);
     if let Some(w) = font_told {
@@ -6368,11 +6376,34 @@ pub(crate) fn import(s: &mut Session, text: &str) -> CmdResult {
             false,
         );
     }
+    // A frame centred where its map can't place the point (a pole on Web Mercator) is said (#2684).
+    let unplaced: Vec<String> = l.elements.iter().filter_map(|e| unplaced_center(s, &l, e.id)).collect();
+    for said in unplaced {
+        s.notify(said, false);
+    }
     let name = l.name.clone();
     s.project.layouts.push(l);
     let i = s.project.layouts.len() - 1;
     s.active_layout = Some(i);
     Ok(json!({"layout": i, "name": name}))
+}
+
+/// What is said of map frame `id` in `l` when its centre lies where its map's projection can't
+/// place it (a pole on Web Mercator, whose poles are at infinity): it's drawn at 85° instead
+/// (#2684). `None` when it's drawn where it's centred, or `id` isn't a frame of a map here.
+fn unplaced_center(s: &Session, l: &Layout, id: u32) -> Option<String> {
+    let e = l.element(id)?;
+    let ElementKind::MapFrame { map, center, .. } = &e.kind else { return None };
+    let m = s.project.maps.iter().find(|m| m.name.eq_ignore_ascii_case(map))?;
+    (!rustgis_map::layout::frame_center_placed(m, *center)).then(|| {
+        format!(
+            "{}: the frame '{}' is centred at latitude {}, which the map's projection can't show: it's drawn at {}",
+            crate::project::short_name(&l.name),
+            crate::project::short_name(&e.name),
+            rustgis_map::symbology::fmt_num(center.y),
+            if center.y < 0.0 { "85° S" } else { "85° N" }
+        )
+    })
 }
 
 /// Selects the explicit or first feature layer in the stored frame's map.
