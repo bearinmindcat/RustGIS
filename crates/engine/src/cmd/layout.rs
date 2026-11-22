@@ -2853,8 +2853,7 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
         warnings.extend(legend_fit_warnings(legend_cols, (cw, ch), (iw, rows_h)).into_iter().map(String::from));
         let short = bar_need > bar_fit + LEGEND_FIT_MM;
         // In a column the colorbar takes the column's width, as its rows do.
-        if let Some(layer) = bar.as_deref().filter(|_| (base_w > iw + LEGEND_FIT_MM && !legend_in_column) || short)
-        {
+        if let Some(layer) = bar.as_deref().filter(|_| (base_w > iw + LEGEND_FIT_MM && !legend_in_column) || short) {
             warnings.push(format!("the legend's box is smaller than the colorbar of '{layer}': it is drawn narrower or shorter"));
         }
         if ch > 0.0 && rows_h >= 1.0 {
