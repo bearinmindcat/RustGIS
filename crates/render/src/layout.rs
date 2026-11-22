@@ -3681,13 +3681,12 @@ pub fn colorbar_title_lines(title: &str, width: f64) -> Vec<String> {
 }
 
 /// How many of a colorbar's `lines` of title it draws in an element from `top` (pixels), its
-/// title at `px` pixels (#2493): the first always, as a title of one line always was; each
-/// further one only when the room it takes ends by `limit`, the element's bottom less the bar's
-/// own room ([`colorbar_bar_room`]), so the bar keeps its labels; at most 200. The page's
-/// cut-off check ([`text_losses`]) counts the rest the same way.
+/// title at `px` pixels (#2493): each line only when the room it takes ends by `limit`, the
+/// element's bottom less the bar's own room ([`colorbar_bar_room`]), the first too, so the bar
+/// always keeps its labels (#2638); at most 200. The page's cut-off check ([`text_losses`])
+/// counts the lines left out the same way, so a colorbar too short for its title says so.
 fn colorbar_title_drawn(lines: usize, top: f32, limit: f32, px: f32) -> usize {
-    let further = (1..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= limit + 0.5).count();
-    usize::from(lines > 0) + further
+    (0..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= limit).count()
 }
 
 /// The least room a colorbar's bar takes under its title, in pixels at `ppp` (#2638): a bar of
@@ -7315,6 +7314,23 @@ Elaboração: RustGIS",
         assert!((40..50).any(dark), "its labels under it");
     }
 
+    /// A colorbar's title lines are drawn only where the bar keeps its own room under them, the
+    /// first too, with no slack: the bar never loses its labels to them (#2638). At 12 px a line,
+    /// the first needs 16.8 px and each further one 15 more, over the bar's 19.8.
+    #[test]
+    fn a_colorbars_title_lines_leave_the_bar_its_room() {
+        let (px, room) = (COLORBAR_TITLE_PT as f32 * 1.33, colorbar_bar_room(1.0));
+        for (height, lines) in [(20.0, 0), (36.0, 0), (37.0, 1), (51.2, 1), (52.0, 2), (200.0, 5)] {
+            assert_eq!(colorbar_title_drawn(5, 0.0, height - room, px), lines, "{height} px");
+        }
+        // Whatever the height, the lines drawn leave the bar its room.
+        for h in 0..300 {
+            let h = h as f32 * 0.5;
+            let n = colorbar_title_drawn(5, 0.0, h - room, px);
+            assert!(n == 0 || px * (1.4 + 1.25 * (n - 1) as f32) + room <= h, "{h} px: {n} lines");
+        }
+    }
+
     /// A colorbar too short for its title's lines draws those that fit inside it, not lines past
     /// its bottom, and the page's cut-off check says the rest are left out; one tall enough says
     /// nothing (#2493).
@@ -7324,9 +7340,9 @@ Elaboração: RustGIS",
         let title = "Precipitação média mensal JAXA GSMaP (mm/mês), jan–mar 2025";
         let bar =
             Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
-        // 100 px wide, four lines or more; 20 px high, the first only: a second's room would end
-        // at 10 + 12 × (1.4 + 1.25) = 41.8, past its bottom at 30 (where it would be centred at
-        // 32, within a line of it, as a text element's line may be).
+        // 100 px wide, four lines or more; 20 px high, no line: the first's room would end at
+        // 10 + 12 × 1.4 = 26.8, leaving the bar less than its own 19.8 (a second would be centred
+        // at 32, within a line of the bottom at 30, as a text element's line may be).
         assert!(colorbar_title_lines(title, 100.0 / PT_PER_MM).len() >= 4);
         let mut c = Canvas::new(300, 200).unwrap();
         colorbar(&mut c, Rect::from_xywh(10.0, 10.0, 100.0, 20.0).unwrap(), &scale, &bar, 1.0);
@@ -7358,10 +7374,10 @@ Elaboração: RustGIS",
         let info = PageInfo::default();
         let losses = text_losses(&l, std::slice::from_ref(&map), 96.0, &info);
         assert_eq!(losses.len(), 1, "the short colorbar's title is cut");
-        // 6 mm high: the first line only, every other one said.
+        // 6 mm high: no room for a line of title over the bar's own: every line said.
         let lines = colorbar_title_lines(title, 25.0).len();
         assert!(lines >= 3 && losses[0].id == id && losses[0].below_box, "{lines} lines");
-        assert_eq!(losses[0].left_out, lines - 1);
+        assert_eq!(losses[0].left_out, lines);
         l.element_mut(id).unwrap().h = 40.0;
         assert!(text_losses(&l, std::slice::from_ref(&map), 96.0, &info).is_empty(), "tall enough for every line");
     }
