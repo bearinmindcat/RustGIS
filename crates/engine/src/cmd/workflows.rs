@@ -37,7 +37,9 @@ pub fn commands() -> Vec<C> {
             let (_, g, _) = model_graph(s, p)?;
             note_passed_graph(s, p);
             let problems = crate::model::validate(s, &g);
-            Ok(json!({"ok": problems.is_empty(), "problems": problems}))
+            // What the model does that it may not mean, which doesn't keep it from running.
+            let warnings = crate::model::warnings(&g);
+            Ok(json!({"ok": problems.is_empty(), "problems": problems, "warnings": warnings}))
         }).roles(&[crate::ParamRole { key: "graph", role: crate::Role::ModelGraph }]).effects(crate::policy::Effects::NONE)
         .view()
         .params(r#"{"name"?: model (default: the last), "graph"?: graph}"#),
@@ -1060,13 +1062,36 @@ fn run_steps(s: &mut Session, model: Model) -> CmdResult {
             st.tool
         ));
     }
+    // The parameters the steps ignore are said once for the run, as a graph's run says them
+    // (#2307). A failed run's error carries them, as its notices go back with its changes.
+    let mut ignored = Vec::new();
+    let res = run_step_list(s, &model, &mut ignored);
+    let said = crate::model::ignored_summary(&ignored);
+    match res {
+        Err(e) if !said.is_empty() => Err(format!("{e}; {said}")),
+        res => {
+            if !said.is_empty() {
+                s.warn(said);
+            }
+            res
+        }
+    }
+}
+
+/// Runs each of a model's steps in order ([`run_steps`]), collecting into `ignored` what each
+/// step's tool ignores ([`super::gp::ignored_params`]).
+fn run_step_list(s: &mut Session, model: &Model, ignored: &mut Vec<String>) -> CmdResult {
     let mut outputs: Vec<String> = Vec::new();
     let mut ran = Vec::new();
     for (i, st) in model.steps.iter().enumerate() {
         let mut params = st.params.clone();
         wire(&mut params, &outputs, i, 0)?;
         let before = s.project.gp_history.len();
-        let r = super::gp::run_tool(s, &st.tool, &params).map_err(|e| format!("step {} ({}): {e}", i + 1, st.tool))?;
+        let r = super::gp::run_step(s, &st.tool, &params).map_err(|e| format!("step {} ({}): {e}", i + 1, st.tool))?;
+        // Said once for the run; a failing step's error names its own keys already.
+        if let Some(said) = rustgis_analysis::resolve_published(&st.tool).and_then(|r| super::gp::ignored_params(r.spec(), &params)) {
+            ignored.push(said);
+        }
         // A step that made no layer leaves nothing for a later %n to use.
         let out =
             (s.project.gp_history.len() > before).then(|| s.project.gp_history.last().and_then(|h| h.outputs.first().cloned())).flatten();
@@ -1095,7 +1120,9 @@ fn wire(v: &mut Value, outputs: &[String], step: usize, depth: usize) -> Result<
 /// Runs a script of commands, one per line (`id {json}`), stopping at the first error. Scripts
 /// typed in the Script pane or passed on the command line are the user's own, so they may use
 /// any command, files included; notebooks vet cells that came from files before running them.
-/// The whole script is one undo step.
+/// The whole script is one undo step, none when no line changed what undo restores
+/// ([`Session::shared_step`]): its lines only read the project, moved the view, wrote files
+/// elsewhere, left a request, or said they changed nothing.
 pub(crate) fn run_script(s: &mut Session, p: &Value) -> CmdResult {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(ran) = super::reads::take::<super::gp::RanAheads>(s, SCRIPT_AHEAD) {
@@ -1153,6 +1180,9 @@ fn run_script_here(s: &mut Session, p: &Value, prepared: bool) -> CmdResult {
         let r = r.map_err(|e| format!("line {n}: {id}: {e}"))?;
         out.push(json!({"line": n, "command": id, "result": r}));
     }
+    // An undo step only when a line edited ([`Session::shared_step`]); run inside a task, the
+    // task's account, earlier steps included, decides.
+    s.request_only = !s.shared_steps.edited;
     Ok(json!({"ran": out}))
 }
 
@@ -2058,6 +2088,8 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
             let mut notes = rustgis_data::export_notes([(&ds, layer.extent())], &path, rustgis_data::raster::Crs::LonLat);
             if format == "csv" {
                 notes.extend(result.csv.notes(&ds.fields, &path));
+                notes.extend(result.csv.coordinates_note(&ds.fields, &path));
+                notes.extend(result.text.notes(&ds.fields, &path));
             }
             if result.skipped > 0 {
                 notes.push(format!("{path}: {} rows couldn't be read and were left out", result.skipped));
@@ -2075,6 +2107,7 @@ pub(crate) fn convert_work(s: &Session, p: &Value) -> Result<super::exports::Wor
                     .map(|n| format!("{path}: {}: {n}, so they're empty in the export", ds.name)),
             );
             notes.extend(result.read_notes.iter().map(|n| format!("{path}: {}: {n} when read for the export", ds.name)));
+            notes.extend(rustgis_data::source::not_utf8_note(&ds.fields, &result.not_utf8).map(|n| format!("{path}: {}: {n}", ds.name)));
             (notes, result.null_numbers, result.query)
         } else {
             let (mut ds, unreadable) = if layer.is_streamed() {
@@ -2147,6 +2180,7 @@ fn converted(ds: &Dataset, p: &Value) -> Result<(String, Vec<String>), String> {
     };
     let target = ps(p, "path").unwrap_or(&ds.name);
     let mut notes = rustgis_data::export_notes([(ds, ds.lonlat_extent())], target, rustgis_data::raster::Crs::LonLat);
+    // CSV holds a point a row, GPX a name for each feature and no areas; reading text back trims it or reads blanks as null.
     notes.extend(rustgis_data::io::export_losses_notes(ds, format, name_field, target).map_err(|e| e.to_string())?);
     // KML and GPX hold features with geometry only.
     if let ext @ ("kml" | "gpx") = format {

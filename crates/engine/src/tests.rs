@@ -53,6 +53,9 @@ mod service_logins;
 #[path = "tests/scopes_and_redaction.rs"]
 mod scopes_and_redaction;
 
+#[path = "tests/elevation_tiles.rs"]
+mod elevation_tiles;
+
 #[path = "tests/layout_files.rs"]
 mod layout_files;
 
@@ -248,11 +251,9 @@ fn layer_move_reorders_in_one_undo_step() {
     // Past the end is the bottom.
     s.run("layer.move", &json!({"layer": "Rivers", "to": 1e9})).unwrap();
     assert_eq!(names(&s), ["Cities", "Lakes", "Countries", "Rivers"]);
-    // Staying put, a missing or junk position and an unknown layer fail and leave no undo step.
+    // A missing or junk position and an unknown layer fail and leave no undo step.
     let depth = s.undo_depth();
     for p in [
-        json!({"layer": "Rivers", "to": 3}),
-        json!({"layer": "Rivers", "to": 99}),
         json!({"layer": "Rivers"}),
         json!({"layer": "Rivers", "to": -1}),
         json!({"layer": "Rivers", "to": 1.5}),
@@ -264,6 +265,150 @@ fn layer_move_reorders_in_one_undo_step() {
     assert_eq!(s.undo_depth(), depth);
     s.run("edit.undo", &Value::Null).unwrap();
     assert_eq!(names(&s), ["Rivers", "Cities", "Lakes", "Countries"]);
+}
+
+/// A move to where the layers already are succeeds and changes nothing, with no undo step and
+/// nothing to save, so a script setting the drawing order runs on any map (#2621).
+#[test]
+fn layer_move_to_where_layers_are_is_a_no_op() {
+    let mut s = world();
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    s.mark_saved();
+    let (depth, order) = (s.undo_depth(), names(&s));
+    let [top, second, .., last] = &order[..] else { panic!("{order:?}") };
+    for p in [
+        json!({"layer": top, "to": 0}),
+        json!({"layer": second, "to": 1}),
+        // Past the end is the bottom, where the last layer already is.
+        json!({"layer": last, "to": 99}),
+        json!({"layer": [top, second], "to": 0}),
+        json!({"layer": [second, top], "to": 0}),
+    ] {
+        s.run("layer.move", &p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        assert_eq!(names(&s), order, "{p}");
+        assert_eq!(s.undo_depth(), depth, "{p}");
+        assert!(!s.dirty(), "{p}");
+    }
+    // A move still leaves its step after the no-ops.
+    s.run("layer.move", &json!({"layer": top, "to": 1})).unwrap();
+    assert_eq!(s.undo_depth(), depth + 1);
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(names(&s), order);
+    // In a group: the layer's own place is a no-op, outside the group is still refused.
+    let (third, last) = (order[2].clone(), last.clone());
+    s.run("group.add", &json!({"name": "Bottom", "layers": [&third, &last]})).unwrap();
+    let (depth, order) = (s.undo_depth(), names(&s));
+    let at = order.iter().position(|n| *n == last).unwrap();
+    for p in [json!({"layer": &last, "to": at}), json!({"layer": [&third, &last], "to": 99})] {
+        s.run("layer.move", &p).unwrap_or_else(|e| panic!("{p}: {e}"));
+        assert_eq!((names(&s), s.undo_depth()), (order.clone(), depth), "{p}");
+    }
+    assert!(s.run("layer.move", &json!({"layer": &last, "to": 0})).is_err());
+    assert_eq!((names(&s), s.undo_depth()), (order, depth));
+}
+
+/// In a script, a line that changes nothing doesn't take away the undo step of an earlier line's
+/// edit, wherever it comes; a script of such lines alone leaves none.
+#[test]
+fn script_keeps_its_undo_step_when_a_line_changes_nothing() {
+    let mut s = world();
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    s.mark_saved();
+    let (depth, order) = (s.undo_depth(), names(&s));
+    let top = &order[0];
+    let stay = format!("layer.move {}", json!({"layer": top, "to": 0}));
+    // Nor do lines that only read or move the view, before or after one that changes nothing, nor
+    // comments alone: as each run by itself.
+    let reads = "info.project {}\nmap.zoomIn {}";
+    for script in [format!("{stay}\n{stay}"), reads.into(), format!("{stay}\n{reads}"), format!("{reads}\n{stay}"), "# nothing\n\n".into()]
+    {
+        s.run("script.run", &json!({"script": script})).unwrap();
+        assert_eq!((names(&s), s.undo_depth(), s.dirty()), (order.clone(), depth, false), "{script}");
+    }
+    // Down, then down again where it already is; and the other way round.
+    let down = format!("layer.move {}", json!({"layer": top, "to": 99}));
+    for script in [format!("{down}\n{down}"), format!("{stay}\n{down}")] {
+        s.run("script.run", &json!({"script": script})).unwrap();
+        assert_eq!(names(&s).last(), Some(top), "{script}");
+        assert_eq!(s.undo_depth(), depth + 1, "{script}");
+        assert!(s.dirty(), "{script}");
+        s.run("edit.undo", &Value::Null).unwrap();
+        assert_eq!(names(&s), order, "{script}");
+    }
+    // An undo in the script is its edit, though the move after it changes nothing: the script
+    // undoes as one step, bringing back what the undo took.
+    s.run("layer.move", &json!({"layer": top, "to": 99})).unwrap();
+    s.run("script.run", &json!({"script": format!("edit.undo {{}}\n{stay}")})).unwrap();
+    assert_eq!((names(&s), s.undo_depth()), (order.clone(), depth + 1));
+    s.run("edit.undo", &Value::Null).unwrap();
+    assert_eq!(names(&s).last(), Some(top));
+}
+
+/// Whether a script's line edited is measured, not inferred from what it may reach (#2621): an
+/// export writes a file, the command log reaches app state, yet neither changes what undo
+/// restores. Saving as another file does, and the script's step brings the first file back.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn script_step_follows_what_its_lines_change_not_what_they_reach() {
+    let mut s = world();
+    let files = write_notices::Files::new();
+    let dir = files.path();
+    let first = dir.join("first.rgis");
+    s.run("project.saveAs", &json!({"path": first})).unwrap();
+    let depth = s.undo_depth();
+    let top = s.map().layers[0].name.clone();
+    let export = format!("share.exportLayer {}", json!({"layer": top, "path": dir.join("out.geojson")}));
+    let log = "project.logCommands {\"on\": true}\nproject.logCommands {\"on\": false}";
+    for script in [export, log.into()] {
+        s.run("script.run", &json!({"script": script})).unwrap();
+        assert_eq!((s.undo_depth(), s.dirty()), (depth, false), "{script}");
+    }
+    assert!(dir.join("out.geojson").exists());
+    let second = dir.join("second.rgis");
+    s.run("script.run", &json!({"script": format!("project.saveAs {}", json!({"path": second}))})).unwrap();
+    assert_eq!((s.undo_depth(), s.path.as_deref()), (depth + 1, Some(second.as_path())));
+    assert!(s.undo());
+    assert_eq!(s.path.as_deref(), Some(first.as_path()));
+}
+
+/// A task's steps are counted as a script's lines: an undo step only when one edited (#2621).
+#[test]
+fn task_takes_an_undo_step_only_when_a_step_edits() {
+    let mut s = world();
+    let names = |s: &Session| s.map().layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    let order = names(&s);
+    let top = order[0].clone();
+    let stay = json!({"title": "Stay", "command": "layer.move", "params": {"layer": &top, "to": 0}});
+    let down = json!({"title": "Down", "command": "layer.move", "params": {"layer": &top, "to": 99}});
+    let read = json!({"title": "Read", "command": "info.project", "params": {}});
+    for (n, (steps, edits)) in
+        [(json!([&stay, &read]), false), (json!([&read]), false), (json!([&down, &stay]), true), (json!([&stay, &down, &read]), true)]
+            .into_iter()
+            .enumerate()
+    {
+        let name = format!("Task {n}");
+        s.run("task.new", &json!({"name": &name, "steps": steps})).unwrap();
+        s.mark_saved();
+        let depth = s.undo_depth();
+        s.run("task.run", &json!({"task": &name})).unwrap();
+        assert_eq!((s.undo_depth(), s.dirty()), (depth + usize::from(edits), edits), "{steps}");
+        if edits {
+            s.run("edit.undo", &Value::Null).unwrap();
+            assert_eq!(names(&s), order, "{steps}");
+        }
+    }
+    // A task run as a script's line: a no-op task leaves the script none, an editing one its one.
+    for (task, edits) in [("Task 0", false), ("Task 2", true)] {
+        s.mark_saved();
+        let depth = s.undo_depth();
+        let script = format!("info.project {{}}\ntask.run {}", json!({"task": task}));
+        s.run("script.run", &json!({"script": script})).unwrap();
+        assert_eq!((s.undo_depth(), s.dirty()), (depth + usize::from(edits), edits), "{task}");
+        if edits {
+            s.run("edit.undo", &Value::Null).unwrap();
+            assert_eq!(names(&s), order, "{task}");
+        }
+    }
 }
 
 #[test]
@@ -1578,6 +1723,79 @@ fn a_streamed_shapefile_says_null_markers_once_and_in_its_exports() {
                     "{}",
                     notes[0]
                 );
+            }
+        }
+    }
+}
+
+/// A Shapefile read in place that names no encoding says, once, the text values its view reads
+/// found weren't UTF-8 (Big5 here), and its streamed exports (Export, Data Interop) say them too;
+/// a clean one says nothing.
+#[test]
+fn a_streamed_shapefile_says_text_that_isnt_utf8_once_and_in_its_exports() {
+    use rustgis_data::{Dataset, Field, FieldType, Geometry, GeometryType, Value as V};
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = Dir(std::env::temp_dir().join(format!("rustgis-streamed-not-utf8-{}-{nanos}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    // What the notice must carry: the count, the field and the replacement, not its wording.
+    let says = |t: &str| ["1 text value", "'NAME'", "U+FFFD", ".cpg"].iter().all(|k| t.contains(k));
+    // 臺北101 in Big5, and as many bytes of ASCII.
+    for (name, second, said) in [("big5", &b"\xbb\x4f\xa5\x5f101"[..], true), ("clean", &b"Tainan1"[..], false)] {
+        let mut ds = Dataset::new(name, GeometryType::Point, vec![Field::new("NAME", FieldType::Text)]);
+        for (i, text) in ["Taipei", "AAAAAAA"].into_iter().enumerate() {
+            ds.push(Some(Geometry::Point(rustgis_geom::Coord::new(i as f64, 1.0))), vec![V::Text(text.into())]);
+        }
+        let shp = dir.0.join(format!("{name}.shp"));
+        rustgis_data::io::write_path(&ds, &shp).unwrap();
+        // No encoding named: no `.cpg`, and no language driver in the `.dbf`.
+        std::fs::remove_file(shp.with_extension("cpg")).unwrap();
+        let dbf = shp.with_extension("dbf");
+        let mut table = std::fs::read(&dbf).unwrap();
+        table[29] = 0;
+        let at = table.windows(7).position(|w| w == b"AAAAAAA").unwrap();
+        table[at..at + 7].copy_from_slice(second);
+        std::fs::write(&dbf, table).unwrap();
+        let mut s = Session::new(Project::default());
+        let added = s.run("layer.addData", &json!({"path": shp.display().to_string(), "stream": true})).unwrap();
+        let id = added["layer"].as_u64().unwrap() as u32;
+        assert!(s.map().layer(id).unwrap().is_streamed(), "{name} is read in place");
+        let not_utf8 = |s: &Session, mark| -> Vec<String> {
+            s.notices_since(mark).iter().map(|n| n.text.clone()).filter(|t| t.contains("valid UTF-8")).collect()
+        };
+        let mark = s.notice_mark();
+        let view = rustgis_geom::Extent::new(-180.0, -90.0, 180.0, 90.0);
+        s.map_mut().sync_sources(&view, 1000.0, true);
+        s.notice_landed_rasters();
+        // A second read of the same opening lands its batch again and says nothing more.
+        let layer = s.map_mut().layer_mut(id).unwrap();
+        layer.dataset.features.clear();
+        layer.source.as_mut().unwrap().reset();
+        s.map_mut().sync_sources(&view, 1000.0, true);
+        s.notice_landed_rasters();
+        assert!(!s.map().layer(id).unwrap().dataset.features.is_empty(), "{name}: the second read lands");
+        let notes = not_utf8(&s, mark);
+        assert_eq!(notes.len(), usize::from(said), "{name}: view reads: {notes:?}");
+        if said {
+            assert!(notes[0].starts_with("big5: ") && notes[0].contains("Load All Features") && says(&notes[0]), "{}", notes[0]);
+        }
+        // An export a chunk at a time, and a Data Interop conversion of the source, say it.
+        s.map_mut().layer_mut(id).unwrap().dataset.features.clear();
+        for (command, params) in [
+            ("share.exportLayer", json!({"layer": id, "path": dir.0.join(format!("{name}.csv"))})),
+            ("data.convert", json!({"layer": id, "format": "geojson", "path": dir.0.join(format!("{name}.geojson"))})),
+        ] {
+            let mark = s.notice_mark();
+            s.run(command, &params).unwrap();
+            let notes = not_utf8(&s, mark);
+            assert_eq!(notes.len(), usize::from(said), "{name} {command}: {:?}", s.notices_since(mark));
+            if said {
+                assert!(notes[0].contains("big5: ") && says(&notes[0]), "{}", notes[0]);
             }
         }
     }
@@ -13262,6 +13480,115 @@ fn a_legend_takes_columns_from_one_to_three() {
     }
 }
 
+/// `"textSize"` on a legend (#2581): given and changed, 4 to 100 points, null giving the default
+/// back, refused out of that range, as anything but a number and on any other element (where
+/// null is let through, as for `showNoData`); undone as any change; a size its box no longer
+/// holds, or a box that no longer holds its size, says what it loses.
+#[test]
+fn a_legend_takes_a_text_size() {
+    use rustgis_map::layout::{ElementKind, LEGEND_TEXT_PT};
+    let dir = std::env::temp_dir().join(format!("rustgis-legend-text-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.geojson");
+    std::fs::write(
+        &path,
+        r#"{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[[4,4],[6,4],[6,6],[4,6],[4,4]]]}}]}"#,
+    )
+    .unwrap();
+    let mut s = Session::new(Project::default());
+    for _ in 0..4 {
+        s.run("layer.addData", &json!({"path": path.display().to_string()})).unwrap();
+    }
+    s.run("layout.new", &json!({"template": "map"})).unwrap();
+    let size = |s: &Session, id: u64| match s.project.layouts[0].element(id as u32).map(|e| &e.kind) {
+        Some(ElementKind::Legend { text_size, .. }) => *text_size,
+        other => panic!("{other:?}"),
+    };
+    let said = |s: &Session, mark: u64| s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>().join(" | ");
+    let mark = s.notice_mark();
+    let added = s.run("layout.addElement", &json!({"kind": "legend", "x": 10, "y": 10, "w": 150, "h": 150})).unwrap();
+    let id = added["element"].as_u64().unwrap();
+    assert_eq!(size(&s, id), LEGEND_TEXT_PT);
+    let big = s.run("layout.addElement", &json!({"kind": "legend", "textSize": 18, "x": 10, "y": 10, "w": 150, "h": 150})).unwrap();
+    assert_eq!(size(&s, big["element"].as_u64().unwrap()), 18.0);
+    assert_eq!(said(&s, mark), "", "a box that holds it says nothing");
+    s.run("layout.update", &json!({"element": id, "textSize": 12.5})).unwrap();
+    assert_eq!(size(&s, id), 12.5);
+    s.run("layout.update", &json!({"element": id, "title": "Key"})).unwrap();
+    assert_eq!(size(&s, id), 12.5, "another change leaves it");
+    for edge in [4.0, 100.0] {
+        s.run("layout.update", &json!({"element": id, "textSize": edge})).unwrap();
+        assert_eq!(size(&s, id), edge);
+    }
+    s.run("layout.update", &json!({"element": id, "textSize": null})).unwrap();
+    assert_eq!(size(&s, id), LEGEND_TEXT_PT, "null gives the default back");
+    // Out of the range, or no number, it is refused, not drawn at another size, and the legend
+    // keeps its own.
+    for bad in [json!(3.9), json!(100.5), json!(1e6), json!("12"), json!(true), json!([9])] {
+        let err = s.run("layout.update", &json!({"element": id, "textSize": bad})).unwrap_err();
+        assert!(err.contains("textSize is a number of points, 4 to 100"), "{bad}: {err}");
+        assert_eq!(size(&s, id), LEGEND_TEXT_PT, "{bad}");
+        let err = s.run("layout.addElement", &json!({"kind": "legend", "textSize": bad})).unwrap_err();
+        assert!(err.contains("textSize is a number of points, 4 to 100"), "{bad}: {err}");
+    }
+    s.run("layout.update", &json!({"element": id, "textSize": 20})).unwrap();
+    s.run("edit.undo", &json!({})).unwrap();
+    assert_eq!(size(&s, id), LEGEND_TEXT_PT, "undone");
+    let arrow = s.run("layout.addElement", &json!({"kind": "northArrow"})).unwrap();
+    let err = s.run("layout.addElement", &json!({"kind": "northArrow", "textSize": 12})).unwrap_err();
+    assert!(err.contains("only legends take textSize"), "{err}");
+    let err = s.run("layout.update", &json!({"element": arrow["element"], "textSize": 12})).unwrap_err();
+    assert!(err.contains("only legends take textSize"), "{err}");
+    // A null there is let through, as for showNoData: it asks for nothing.
+    s.run("layout.addElement", &json!({"kind": "northArrow", "textSize": null})).unwrap();
+    s.run("layout.update", &json!({"element": arrow["element"], "textSize": null})).unwrap();
+    // A locked legend takes no size, and null counts as a change there too.
+    s.run("layout.update", &json!({"element": id, "locked": true})).unwrap();
+    assert!(s.run("layout.update", &json!({"element": id, "textSize": null})).is_err());
+    s.run("layout.update", &json!({"element": id, "locked": false})).unwrap();
+    // Grown past what its box holds, in one column, it says what it loses; and the measure is the
+    // one it draws at: the same box holds the rows at 9 points.
+    s.run("layout.update", &json!({"element": id, "w": 40, "h": 40})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "textSize": 40})).unwrap();
+    assert!(said(&s, mark).contains("its last rows or the ends of long labels are left out"), "{}", said(&s, mark));
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "textSize": 9})).unwrap();
+    assert_eq!(said(&s, mark), "");
+    // Added in a box too small for it: told whenever a text size is given, 9 included, as
+    // `"columns"` is; given nothing, it says nothing, as before.
+    for pt in [40, 9] {
+        let mark = s.notice_mark();
+        s.run("layout.addElement", &json!({"kind": "legend", "textSize": pt, "x": 10, "y": 10, "w": 5, "h": 5})).unwrap();
+        assert!(said(&s, mark).contains("are left out"), "{pt} pt: {}", said(&s, mark));
+    }
+    let mark = s.notice_mark();
+    s.run("layout.addElement", &json!({"kind": "legend", "x": 10, "y": 10, "w": 5, "h": 5})).unwrap();
+    assert_eq!(said(&s, mark), "", "nothing given, nothing said");
+    // With a size of its own, a box made too small for it says so too, in one column; at the
+    // default size a resize says nothing, as before.
+    s.run("layout.update", &json!({"element": id, "w": 150, "h": 150})).unwrap();
+    s.run("layout.update", &json!({"element": id, "textSize": 40})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "w": 40, "h": 40})).unwrap();
+    assert!(said(&s, mark).contains("its last rows or the ends of long labels are left out"), "{}", said(&s, mark));
+    s.run("layout.update", &json!({"element": id, "textSize": null, "w": 150, "h": 150})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "w": 40, "h": 40})).unwrap();
+    assert_eq!(said(&s, mark), "", "a default legend is told on a resize only in columns");
+    // `null` columns or missing-value row changes nothing and says nothing; a `null` text size gives
+    // 9 points back and is told, as a new size is.
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "columns": null, "showNoData": null})).unwrap();
+    assert_eq!(said(&s, mark), "", "nothing changed, nothing said");
+    s.run("layout.update", &json!({"element": id, "textSize": 40, "w": 150, "h": 150})).unwrap();
+    s.run("layout.update", &json!({"element": id, "w": 5, "h": 5})).unwrap();
+    let mark = s.notice_mark();
+    s.run("layout.update", &json!({"element": id, "textSize": null})).unwrap();
+    assert!(said(&s, mark).contains("are left out"), "{}", said(&s, mark));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A legend given `"columns"` says when its box doesn't hold them, and only then.
 #[test]
 fn a_legends_columns_say_when_its_box_is_too_small() {
@@ -14624,6 +14951,44 @@ fn terrain_block_walls_follow_a_polygon_layer() {
     assert!(said.iter().any(|t| t.starts_with("Terrain turned off")), "{said:?}");
     assert!(!said.iter().any(|t| t.contains("walls layer")), "{said:?}");
     assert!(s.map().view.terrain.is_none());
+}
+
+/// #2605: `map.terrain`'s help names every key the block's parts and the water take, each in its
+/// own part of the text, as the parser lists them when it refuses one it doesn't know (the walls'
+/// object form of #2173 was missing); so do the errors for a block or water that isn't an object.
+#[test]
+fn terrain_help_names_every_block_key() {
+    let mut s = Session::new(Project::default());
+    let help = s.registry.get("map.terrain").map(|c| c.params).unwrap();
+    // The text between `from` and the next `to` after it.
+    let part = |from: &str, to: &str| {
+        let at = help.find(from).unwrap_or_else(|| panic!("no {from} in {help}"));
+        let rest = &help[at..];
+        rest[..rest.find(to).unwrap_or_else(|| panic!("no {to} after {from}"))].to_string()
+    };
+    // The keys an error lists at its end, "(a, b, c)".
+    let listed = |e: &str| -> Vec<String> {
+        let keys = e.rsplit_once('(').and_then(|(_, k)| k.strip_suffix(')')).unwrap_or_else(|| panic!("{e}"));
+        keys.split(", ").map(str::to_string).collect()
+    };
+    for (params, from, to) in [
+        (json!({"block": {"bogus": 1}}), r#""block"?:"#, ", or false to take it off"),
+        (json!({"block": {"walls": {"bogus": 1}}}), r#""walls"?:"#, r#", "shape"?:"#),
+        (json!({"block": {"shape": {"bogus": 1}}}), r#""shape"?:"#, r#", "radius"?:"#),
+        (json!({"block": {"water": {"bogus": 1}}}), r#""water"?: the terrain's water"#, ", or false}"),
+        (json!({"water": {"bogus": 1}}), r#""water"?: water bodies"#, ", or false to take it off"),
+    ] {
+        let e = s.run("map.terrain", &params).unwrap_err();
+        let text = part(from, to);
+        for k in listed(&e) {
+            assert!(text.contains(&format!("\"{k}\"")), "{params}: the help's {from} part doesn't name \"{k}\": {text}");
+        }
+    }
+    for (what, wrong) in [("block", json!({"block": {"bogus": 1}})), ("water", json!({"water": {"bogus": 1}}))] {
+        let keys = listed(&s.run("map.terrain", &wrong).unwrap_err());
+        let e = s.run("map.terrain", &json!({what: 3})).unwrap_err();
+        assert_eq!(listed(e.split_once(", or false").map_or(e.as_str(), |(head, _)| head)), keys, "{e}");
+    }
 }
 
 #[test]
@@ -26503,7 +26868,14 @@ fn csv_and_gpx_exports_say_what_they_leave_out() {
     ];
     s.map_mut().add_dataset(layer("Sites", GeometryType::Point, pts));
     let clean = vec![(Geometry::Point(Coord::new(1.0, 2.0)), vec![V::Text("P".into()), V::Null])];
-    s.map_mut().add_dataset(layer("Clean", GeometryType::Point, clean));
+    s.map_mut().add_dataset(layer("Clean", GeometryType::Point, clean.clone()));
+    // Names alone, which GPX holds whole.
+    let named = |mut ds: Dataset| {
+        ds.fields.truncate(1);
+        ds.features.iter_mut().for_each(|f| f.attrs.truncate(1));
+        ds
+    };
+    s.map_mut().add_dataset(named(layer("Names", GeometryType::Point, clean)));
     let said = |s: &mut Session, id: &str, p: Value| {
         let mark = s.notices.len();
         s.run(id, &p).unwrap();
@@ -26564,6 +26936,9 @@ fn csv_and_gpx_exports_say_what_they_leave_out() {
     ] {
         assert!(n.len() == 1 && n[0].contains("1 field wasn't written: 'height'"), "{n:?}");
     }
+    // Names alone: GPX holds them whole.
+    assert_eq!(said(&mut s, "share.exportLayer", json!({"layer": "Names", "path": out("names.gpx")})), Vec::<String>::new());
+    assert_eq!(said(&mut s, "data.convert", json!({"layer": "Names", "format": "gpx"})), Vec::<String>::new());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -40438,6 +40813,27 @@ fn model_graphs(s: &mut Session) {
     let rep = s.model_run.clone().unwrap();
     assert_eq!(rep.nodes.last().unwrap().status, "error");
     assert_eq!(s.map().layers.len(), layers, "a failed run is undone");
+    // A parameter a step's tool ignores is said once for the run (#2307): in the error of a run
+    // that fails later, which keeps it after the rollback, and beside the result of one that doesn't.
+    let failing_ignores = json!({"nodes": [
+        {"id": "i1", "kind": "input", "layer": "Cities"},
+        {"id": "t1", "kind": "tool", "tool": "buffer", "params": {"distance": 20, "unit": "Miles"}},
+        {"id": "t2", "kind": "tool", "tool": "dissolve", "params": {"field": "no_such_field"}}],
+        "edges": [{"from": "i1", "fromPort": "out", "to": "t1", "toPort": "input"},
+                  {"from": "t1", "fromPort": "out", "to": "t2", "toPort": "input"}]});
+    let e = s.run("model.run", &json!({"graph": failing_ignores})).unwrap_err();
+    assert!(e.contains("Buffer ignores 'unit'"), "{e}");
+    let repeats = json!({"nodes": [
+        {"id": "i1", "kind": "input", "layer": "Cities"},
+        {"id": "t1", "kind": "tool", "tool": "buffer", "params": {"distance": 20, "unit": "Miles"}},
+        {"id": "t2", "kind": "tool", "tool": "buffer", "params": {"distance": 5, "unit": "Miles"}}],
+        "edges": [{"from": "i1", "fromPort": "out", "to": "t1", "toPort": "input"},
+                  {"from": "t1", "fromPort": "out", "to": "t2", "toPort": "input"}]});
+    let mark = s.notice_mark();
+    s.run("model.run", &json!({"graph": repeats})).unwrap();
+    let said: Vec<&str> = s.notices_since(mark).iter().map(|n| n.text.as_str()).filter(|t| t.contains("ignores 'unit'")).collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(said[0].contains("(in 2 steps)"), "{said:?}");
     // Two outputs on one result are refused.
     let mut twice = graph.clone();
     twice["nodes"].as_array_mut().unwrap().push(json!({"id": "o2", "kind": "output", "name": "Again"}));
@@ -43178,6 +43574,34 @@ fn data_interop_reads_the_whole_source() {
     }
     let error = s.run("data.convert", &json!({"layer": id, "format": "geojson"})).unwrap_err();
     assert!(error.contains("path"), "{error}");
+}
+
+/// A streamed point layer converted to CSV in chunks says, as a whole conversion does, when its
+/// fields take every name reading takes for a longitude or latitude; a plain one doesn't.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn streamed_csv_conversion_says_coordinate_columns_reading_wouldnt_take() {
+    let fixture = GpkgRegressionFixture::new("interop-coordinates");
+    let said = |name: &str| {
+        let mut s = Session::new(Project::default());
+        let id = s.run("layer.addData", &json!({"path": fixture.path(), "stream": true})).unwrap()["layer"].clone();
+        assert!(s.map().layer(id.as_u64().unwrap() as u32).unwrap().is_streamed());
+        let mark = s.notice_mark();
+        s.run("data.convert", &json!({"layer": id, "format": "csv", "path": fixture.dir.join(name)})).unwrap();
+        s.notices_since(mark).iter().filter(|n| n.text.contains("every name read as a longitude or latitude")).count()
+    };
+    assert_eq!(said("plain.csv"), 0);
+    let db = rusqlite::Connection::open(fixture.path()).unwrap();
+    for column in ["longitude", "lon", "lng", "long", "lon_dd", "longitude_dd", "stop_lon"].iter().chain(&[
+        "latitude",
+        "lat",
+        "lat_dd",
+        "latitude_dd",
+        "stop_lat",
+    ]) {
+        db.execute_batch(&format!("ALTER TABLE roads ADD COLUMN \"{column}\" TEXT DEFAULT 'a';")).unwrap();
+    }
+    assert_eq!(said("named.csv"), 1);
 }
 
 /// A non-finite REAL survives source reading but becomes JSON null: both whole and chunked
