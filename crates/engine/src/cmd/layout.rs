@@ -2189,7 +2189,12 @@ fn publication(s: &mut Session, p: &Value) -> CmdResult {
     let base_w = if sheet { 50.0 * k } else { 40.0 };
     let bar_w = base_w.max(bar.as_deref().map_or(0.0, crate::render::layout::colorbar_title_width_mm).min(title_room));
     let bar_h = bar.as_deref().map_or(COLORBAR_MM, |title| colorbar_mm(title, bar_w.min(title_room)));
-    let bar_part = if bar.is_some() { bar_h + if ch > 0.0 { 2.0 } else { 0.0 } } else { 0.0 };
+    let bar_gap = if ch > 0.0 { 2.0 } else { 0.0 };
+    // Over the map the box is never placed taller than 60% of the frame, so the title's lines
+    // count only up to that (a colorbar's own height, as before, at the least): the map isn't
+    // moved, veiled or scaled for room the box can't have. The lines past it are said as cut off.
+    let bar_h = if column.is_none() { bar_h.min(fh * 0.6 - 2.0 * pad - ch - bar_gap).max(COLORBAR_MM) } else { bar_h };
+    let bar_part = if bar.is_some() { bar_h + bar_gap } else { 0.0 };
     let (content_w, content_h) = (if bar.is_some() { cw.max(bar_w) } else { cw }, ch + bar_part);
     let legend_in_column = column.is_some();
     if content_h > 0.0 && !legend_in_column {

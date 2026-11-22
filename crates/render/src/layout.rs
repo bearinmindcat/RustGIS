@@ -252,7 +252,8 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
         .filter_map(|e| {
             // At least a pixel each way, as the page draws it.
             let r = Rect::from_xywh((e.x * k) as f32, (e.y * k) as f32, ((e.w * k) as f32).max(1.0), ((e.h * k) as f32).max(1.0))?;
-            let (s, size, face, align, spacing, rotation, title, broken) = match &e.kind {
+            // `fits`: how many of its lines the element draws, when it decides that itself.
+            let (s, size, face, align, spacing, rotation, title, broken, fits) = match &e.kind {
                 ElementKind::Text { text: t, size, color, bold, italic, align, letter_spacing, font, font_name, rotation, wrap }
                     if color.a() > 0 =>
                 {
@@ -260,12 +261,12 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
                     let s = expand(t, layout, info, first);
                     // Its lines as they are drawn: a wrapped text's, broken to its box.
                     let s = if *wrap { wrapped(&s, e.w, *size, style) } else { s };
-                    (s, *size as f32, style.face, *align, *letter_spacing as f32, *rotation as f32, false, *wrap)
+                    (s, *size as f32, style.face, *align, *letter_spacing as f32, *rotation as f32, false, *wrap, None)
                 }
                 ElementKind::Legend { title, frame, .. } => {
                     let ElementKind::MapFrame { map, .. } = &layout.element(*frame)?.kind else { return None };
                     map_index(maps, map)?;
-                    (title.clone(), 12.0, text::Face { bold: true, ..Default::default() }, TextAlign::Left, 0.0, 0.0, true, false)
+                    (title.clone(), 12.0, text::Face { bold: true, ..Default::default() }, TextAlign::Left, 0.0, 0.0, true, false, None)
                 }
                 // A colorbar's title in the lines it is drawn in (#2493), when it draws one: its
                 // frame's map has a raster with a colour scale (else it draws a placeholder).
@@ -275,8 +276,10 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
                     rustgis_map::layout::colorbar_layer(m, layer.as_deref())
                         .and_then(|l| l.raster.as_ref())
                         .and_then(rustgis_map::layout::color_scale)?;
-                    let s = colorbar_title_lines(title, e.w).join("\n");
-                    (s, COLORBAR_TITLE_PT as f32, colorbar_title_style().face, TextAlign::Left, 0.0, 0.0, false, true)
+                    let lines = colorbar_title_lines(title, e.w);
+                    let fits = colorbar_title_drawn(lines.len(), r.y(), r.bottom(), COLORBAR_TITLE_PT as f32 * 1.33 * ppp);
+                    let s = lines.join("\n");
+                    (s, COLORBAR_TITLE_PT as f32, colorbar_title_style().face, TextAlign::Left, 0.0, 0.0, false, true, Some(fits))
                 }
                 _ => return None,
             };
@@ -287,7 +290,10 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
             let lines = std::iter::once(s.as_str()).filter(|_| title).chain(s.lines().filter(|_| !title));
             let (mut cut, mut left_out, mut below_box, mut past_limit) = (false, 0, false, false);
             for (i, line) in lines.enumerate() {
-                let drawn = i < 200 && (title || cy <= r.bottom() + px);
+                let drawn = match fits {
+                    Some(n) => i < n,
+                    None => i < 200 && (title || cy <= r.bottom() + px),
+                };
                 // A line not drawn is only looked at for a letter, as a wrapped text tells its
                 // ink ([`crate::report::wrap_lines`]): a long text isn't shaped past its box.
                 if !drawn {
@@ -3368,14 +3374,13 @@ fn colorbar(pm: &mut Canvas, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
     let (mut top, bottom) = (r.y(), r.y() + r.height());
     if !bar.title.is_empty() {
         let tpx = COLORBAR_TITLE_PT as f32 * 1.33 * ppp;
-        // Wrapped to the element's width (#2493), its lines drawn as a text element's are: while
-        // a line's middle is within a line of the element's bottom, and at most 200. Those left
-        // out are said with the page's cut-off texts ([`text_losses`]).
+        // Wrapped to the element's width (#2493), its lines drawn as long as they fit in it
+        // ([`colorbar_title_drawn`]). Those left out are said with the page's cut-off texts
+        // ([`text_losses`]).
         let lines = colorbar_title_lines(bar.title, f64::from(r.width()) / (f64::from(ppp) * PT_PER_MM));
-        let line_y = |i: usize| top + tpx * (0.6 + 1.25 * i as f32);
-        let drawn = lines.iter().take(200).enumerate().take_while(|(i, _)| line_y(*i) <= bottom + tpx).count();
+        let drawn = colorbar_title_drawn(lines.len(), top, bottom, tpx);
         for (i, line) in lines.iter().take(drawn).enumerate() {
-            text::text_at(pm, line, r.x(), line_y(i), tpx, dark, true, text::Align::Left, false);
+            text::text_at(pm, line, r.x(), top + tpx * (0.6 + 1.25 * i as f32), tpx, dark, true, text::Align::Left, false);
         }
         top += tpx * (1.4 + 1.25 * drawn.saturating_sub(1) as f32);
     }
@@ -3564,6 +3569,15 @@ pub fn colorbar_title_lines(title: &str, width: f64) -> Vec<String> {
         return vec![title.to_string()];
     }
     wrapped(title, width, COLORBAR_TITLE_PT, colorbar_title_style()).lines().map(str::to_string).collect()
+}
+
+/// How many of a colorbar's `lines` of title it draws in an element from `top` to `bottom`
+/// (pixels), its title at `px` pixels (#2493): the first always, as a title of one line always
+/// was; each further one only when the room it takes ends inside the element; at most 200. The
+/// page's cut-off check ([`text_losses`]) counts the rest the same way.
+fn colorbar_title_drawn(lines: usize, top: f32, bottom: f32, px: f32) -> usize {
+    let further = (1..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= bottom + 0.5).count();
+    usize::from(lines > 0) + further
 }
 
 /// The distance between two lines of text at `size` points, in mm, as [`text_block`] sets them.
@@ -7141,23 +7155,24 @@ Elaboração: RustGIS",
         assert!(line(10 + pitch + 3), "a second line of title");
     }
 
-    /// A colorbar too short for its title's lines draws those that fit, as a text element does,
-    /// not lines spilling down the page, and the page's cut-off check says the rest are left out;
-    /// one tall enough says nothing (#2493).
+    /// A colorbar too short for its title's lines draws those that fit inside it, not lines past
+    /// its bottom, and the page's cut-off check says the rest are left out; one tall enough says
+    /// nothing (#2493).
     #[test]
     fn a_colorbars_title_lines_past_its_bottom_are_left_out_and_said() {
         let scale = ColorScale::Ramp { lo: 0.0, hi: 10.0, colors: vec![Rgba::rgb(200, 200, 200), Rgba::rgb(230, 230, 230)] };
         let title = "Precipitação média mensal JAXA GSMaP (mm/mês), jan–mar 2025";
         let bar =
             Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
-        // 100 px wide, four lines or more; 20 px high, two of them centred within a line of its
-        // bottom. A third would be centred at 10 + 12 × (0.6 + 2 × 1.25) = 47.
+        // 100 px wide, four lines or more; 20 px high, the first only: a second's room would end
+        // at 10 + 12 × (1.4 + 1.25) = 41.8, past its bottom at 30 (where it would be centred at
+        // 32, within a line of it, as a text element's line may be).
         assert!(colorbar_title_lines(title, 100.0 / PT_PER_MM).len() >= 4);
         let mut c = Canvas::new(300, 200).unwrap();
         colorbar(&mut c, Rect::from_xywh(10.0, 10.0, 100.0, 20.0).unwrap(), &scale, &bar, 1.0);
         let dark = |x: u32, y: u32| c.pixmap().pixel(x, y).is_some_and(|p| p.alpha() > 128 && p.red() < 120);
         let lowest = (0..200).rev().find(|y| (0..300).any(|x| dark(x, *y)));
-        assert!(lowest.is_some_and(|y| y < 45), "ink down to {lowest:?}");
+        assert!(lowest.is_some_and(|y| y <= 30), "ink down to {lowest:?}, past the colorbar's bottom at 30");
         // On a page, in a frame whose map has a raster on a ramp.
         let map = ramp_map(
             rustgis_map::raster::RasterRenderer::Stretch { band: 0, ramp: rustgis_map::Ramp::Thermal, invert: false },
@@ -7183,7 +7198,10 @@ Elaboração: RustGIS",
         let info = PageInfo::default();
         let losses = text_losses(&l, std::slice::from_ref(&map), 96.0, &info);
         assert_eq!(losses.len(), 1, "the short colorbar's title is cut");
-        assert!(losses[0].id == id && losses[0].left_out >= 2 && losses[0].below_box, "{} left out", losses[0].left_out);
+        // 6 mm high: the first line only, every other one said.
+        let lines = colorbar_title_lines(title, 25.0).len();
+        assert!(lines >= 3 && losses[0].id == id && losses[0].below_box, "{lines} lines");
+        assert_eq!(losses[0].left_out, lines - 1);
         l.element_mut(id).unwrap().h = 40.0;
         assert!(text_losses(&l, std::slice::from_ref(&map), 96.0, &info).is_empty(), "tall enough for every line");
     }
