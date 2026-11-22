@@ -14623,19 +14623,44 @@ fn a_layout_frame_centred_on_a_pole_is_kept_and_said_where_it_cant_be_shown() {
             Some(ElementKind::MapFrame { center, .. }) => center.y,
             _ => panic!("no frame"),
         };
-        let told = |s: &Session, mark| s.notices_since(mark).iter().any(|n| n.text.contains("can't show") && n.text.contains("85° S"));
+        let told = |s: &Session, mark| {
+            s.notices_since(mark).iter().filter(|n| n.text.contains("can't show") && n.text.contains("'Mapa' at latitude -85")).count() == 1
+        };
         let mark = s.notice_mark();
         s.run("layout.import", &json!({"text": layout})).unwrap();
         assert_eq!(center(&s), -90.0, "{projection:?}: imported");
         assert_eq!(told(&s, mark), said, "{projection:?}: {:?}", s.notices_since(mark));
-        // Moved away, then back onto the pole by its properties.
-        s.run("layout.update", &json!({"element": 1, "center": [0, -60]})).unwrap();
+        // Moved away, then back onto the pole by its properties: each command says only its own.
         let mark = s.notice_mark();
-        assert!(!told(&s, mark));
+        s.run("layout.update", &json!({"element": 1, "center": [0, -60]})).unwrap();
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("can't show")), "{:?}", s.notices_since(mark));
+        let mark = s.notice_mark();
         s.run("layout.update", &json!({"element": 1, "center": [0, -90]})).unwrap();
         assert_eq!(center(&s), -90.0, "{projection:?}: updated");
         assert_eq!(told(&s, mark), said, "{projection:?}: {:?}", s.notices_since(mark));
+        // A longitude past ±180° isn't a centre the projection can't show.
+        let mark = s.notice_mark();
+        s.run("layout.update", &json!({"element": 1, "center": [300, -60]})).unwrap();
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("can't show")), "{:?}", s.notices_since(mark));
     }
+    // Two pole frames in one layout on Web Mercator: one notice, counting both.
+    let mut s = Session::new(Project::default());
+    s.run("map.new", &json!({"name": "Mapa"})).unwrap();
+    let mut two: Value = serde_json::from_str(layout).unwrap();
+    let mut second = two["elements"][0].clone();
+    second["id"] = json!(2);
+    second["name"] = json!("Norte");
+    second["kind"]["MapFrame"]["center"]["y"] = json!(90.0);
+    two["elements"].as_array_mut().unwrap().push(second);
+    two["next_id"] = json!(3);
+    let mark = s.notice_mark();
+    s.run("layout.import", &json!({"text": two.to_string()})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("can't show")).map(|n| n.text.clone()).collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("2 map frame(s)") && said[0].contains("'Mapa' at latitude -85") && said[0].contains("'Norte' at latitude 85"),
+        "{said:?}"
+    );
 }
 
 /// Series page labels and dynamic text share the row-number fallback for null and blank names.

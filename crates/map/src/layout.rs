@@ -2763,15 +2763,12 @@ pub fn frame_camera(map: &Map, center: Coord, scale: f64, bearing: f64, pitch: f
 }
 
 /// Whether a frame centred on `center` (lon/lat) is drawn centred there on `map`: its projection
-/// places the point within a view's reach. A pole on Web Mercator isn't (it lies at infinity;
-/// [`frame_camera`] draws the frame at 85° instead); on a polar map it is (#2684).
+/// places the point, and reads it back at the same latitude. A pole on Web Mercator isn't: its
+/// projection takes a pole to its edge at 85.05°, which reads back as that ([`frame_camera`]
+/// draws the frame at 85° instead); on a polar map it is (#2684). The longitude isn't compared:
+/// it may run past ±180°, and at a pole every longitude is the same point.
 pub fn frame_center_placed(map: &Map, center: Coord) -> bool {
-    let lim = std::f64::consts::PI * rustgis_geom::MERCATOR_R;
-    // Placed, and placed there: Web Mercator's projection takes a pole to its edge at 85.05°, which
-    // reads back as that latitude, not the pole.
-    map.to_map(center).is_some_and(|m| {
-        m.x.abs() <= lim * 1.5 && m.y.abs() <= lim && map.to_lonlat(m).is_some_and(|back| (back.y - center.y).abs() < 1e-4)
-    })
+    map.to_map(center).and_then(|m| map.to_lonlat(m)).is_some_and(|back| (back.y - center.y).abs() < 1e-4)
 }
 
 /// The scale that fits a lon/lat extent into a frame `w_mm`×`h_mm` with a margin, and its centre.
@@ -3843,6 +3840,8 @@ mod tests {
         // On Web Mercator it can't be: drawn at 85° S.
         let merc = Map::new("Mapa");
         assert!(!frame_center_placed(&merc, south) && frame_center_placed(&merc, Coord::new(0.0, -85.0)));
+        // A longitude past ±180° (the sanitizer keeps up to ±540°) is placed: only the latitude counts.
+        assert!(frame_center_placed(&merc, Coord::new(300.0, 40.0)) && frame_center_placed(&merc, Coord::new(-500.0, -60.0)));
         let cam = frame_camera(&merc, south, 60_000_000.0, 0.0, 0.0);
         let at = merc.to_lonlat(cam.center).unwrap();
         assert!((at.y + 85.0).abs() < 1e-6, "{at:?}");
