@@ -480,8 +480,13 @@ pub fn clipped_text_notice(layout: &Layout, clipped: &[(u32, String)]) -> Option
         .collect::<Vec<_>>();
     // Scale bars alone: their labels are no text to break (#2581).
     let bars = clipped.iter().all(|(id, _)| matches!(layout.element(*id).map(|e| &e.kind), Some(ElementKind::ScaleBar { .. })));
+    // Colorbars alone: their titles already wrap, and a tick label isn't fixed by a line break
+    // (#2638).
+    let colorbars = clipped.iter().all(|(id, _)| matches!(layout.element(*id).map(|e| &e.kind), Some(ElementKind::Colorbar { .. })));
     let advice = if bars {
         "make the scale bar larger or move it inside the page, or reduce its text size"
+    } else if colorbars {
+        "make the colorbar taller or its title shorter, so its title lines and tick labels fit"
     } else if wraps.contains(&Some(false)) {
         "resize or move the text, reduce its size, add line breaks, or turn on Wrap to the box"
     } else if wraps.iter().all(|w| *w == Some(true)) {
@@ -7619,6 +7624,9 @@ Elaboração: RustGIS",
             assert_eq!(losses.len() == 1, said, "{case}");
             if let Some(loss) = losses.first() {
                 assert!(loss.below_box && loss.left_out == left_out, "{case}");
+                // Its own advice, not a text's line breaks.
+                let note = clipped_text_notice(&l, &[(loss.id, loss.name.clone())]).unwrap_or_default();
+                assert!(note.contains("make the colorbar taller"), "{case}: {note}");
             }
         }
         // As drawn: 25 px high, the title held back, both end labels inside the element.
