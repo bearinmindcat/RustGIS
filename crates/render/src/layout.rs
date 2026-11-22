@@ -272,14 +272,14 @@ fn losses(layout: &Layout, maps: &[Map], dpi: f64, info: &PageInfo, only: Option
                 }
                 // A colorbar's title in the lines it is drawn in (#2493), when it draws one: its
                 // frame's map has a raster with a colour scale (else it draws a placeholder).
-                ElementKind::Colorbar { frame, layer, title, .. } if !title.is_empty() => {
+                ElementKind::Colorbar { frame, layer, title, orientation, .. } if !title.is_empty() => {
                     let ElementKind::MapFrame { map, .. } = &layout.element(*frame)?.kind else { return None };
                     let m = maps.get(map_index(maps, map)?)?;
                     rustgis_map::layout::colorbar_layer(m, layer.as_deref())
                         .and_then(|l| l.raster.as_ref())
                         .and_then(rustgis_map::layout::color_scale)?;
                     let lines = colorbar_title_lines(title, e.w);
-                    let limit = r.bottom() - colorbar_bar_room(ppp);
+                    let limit = r.bottom() - colorbar_bar_room(ppp, *orientation);
                     let fits = colorbar_title_drawn(lines.len(), r.y(), limit, COLORBAR_TITLE_PT as f32 * 1.33 * ppp);
                     let s = lines.join("\n");
                     (s, COLORBAR_TITLE_PT as f32, colorbar_title_style().face, TextAlign::Left, 0.0, 0.0, false, true, Some(fits))
@@ -3487,7 +3487,7 @@ fn colorbar(pm: &mut Canvas, r: Rect, scale: &ColorScale, bar: &Bar, ppp: f64) {
         // ([`colorbar_title_drawn`]). Those left out are said with the page's cut-off texts
         // ([`text_losses`]).
         let lines = colorbar_title_lines(bar.title, f64::from(r.width()) / (f64::from(ppp) * PT_PER_MM));
-        let drawn = colorbar_title_drawn(lines.len(), top, bottom - colorbar_bar_room(ppp), tpx);
+        let drawn = colorbar_title_drawn(lines.len(), top, bottom - colorbar_bar_room(ppp, bar.orientation), tpx);
         for (i, line) in lines.iter().take(drawn).enumerate() {
             text::text_at(pm, line, r.x(), top + tpx * (0.6 + 1.25 * i as f32), tpx, dark, true, text::Align::Left, false);
         }
@@ -3692,11 +3692,15 @@ fn colorbar_title_drawn(lines: usize, top: f32, limit: f32, px: f32) -> usize {
     (0..lines.min(200)).take_while(|i| top + px * (1.4 + 1.25 * *i as f32) <= limit).count()
 }
 
-/// The least room a colorbar's bar takes under its title, in pixels at `ppp` (#2638): a bar of
-/// 3 points with its ticks and 8-point labels under it, as [`colorbar`] lays them out. A title
-/// stops short of it, so its lines never leave the bar without its labels.
-fn colorbar_bar_room(ppp: f32) -> f32 {
-    (8.0 * 1.33 * 1.2 + 2.5 + 1.5 + 3.0) * ppp
+/// The least room a colorbar's bar takes under its title, in pixels at `ppp` (#2638), as
+/// [`colorbar`] lays it out: a horizontal bar of 3 points with its ticks and 8-point labels under
+/// it; a vertical one, whose labels are at its side, 3 points of bar. A title stops short of it,
+/// so its lines never leave the bar without its labels.
+fn colorbar_bar_room(ppp: f32, orientation: Orientation) -> f32 {
+    match orientation {
+        Orientation::Horizontal => (8.0 * 1.33 * 1.2 + 2.5 + 1.5 + 3.0) * ppp,
+        Orientation::Vertical => 3.0 * ppp,
+    }
 }
 
 /// The distance between two lines of text at `size` points, in mm, as [`text_block`] sets them.
@@ -7317,6 +7321,39 @@ Elaboração: RustGIS",
         assert!((40..50).any(dark), "its labels under it");
     }
 
+    /// A vertical colorbar's labels are at its side, so its title needs only a bar's thickness
+    /// under it, not a horizontal bar's label band (#2638): a vertical colorbar 8 mm high draws
+    /// its one-line title and says nothing, where a horizontal one holds it back and says so.
+    #[test]
+    fn a_vertical_colorbar_keeps_a_title_that_fits_beside_its_labels() {
+        let map = ramp_map(
+            rustgis_map::raster::RasterRenderer::Stretch { band: 0, ramp: rustgis_map::Ramp::Thermal, invert: false },
+            rustgis_map::raster::Stretch::MinMax,
+        );
+        let info = PageInfo::default();
+        for (orientation, cut) in [(Orientation::Vertical, false), (Orientation::Horizontal, true)] {
+            let mut l = Layout::new("Page", 120.0, 90.0);
+            let frame = l.add(
+                "Frame",
+                (60.0, 60.0, 50.0, 25.0),
+                serde_json::from_value(serde_json::json!({"MapFrame":{"map":"m", "center":{"x":0,"y":0}, "scale":1000000}})).unwrap(),
+            );
+            let kind = ElementKind::Colorbar {
+                frame,
+                layer: None,
+                title: "Elevation (m)".into(),
+                orientation,
+                ticks: 5,
+                tick_side: TickSide::End,
+                reverse: false,
+                color: None,
+            };
+            l.add("Colorbar", (5.0, 5.0, 25.0, 8.0), kind);
+            let losses = text_losses(&l, std::slice::from_ref(&map), 96.0, &info);
+            assert_eq!(losses.len() == 1, cut, "{orientation:?}: {losses:?}");
+        }
+    }
+
     /// A colorbar too short for a line of title over its bar holds the title back, and the bar
     /// then starts at the element's top, keeping its labels: a title not drawn takes no room
     /// (#2638). Before, the bar was pushed down by the room of a line never drawn, and lost them.
@@ -7328,7 +7365,10 @@ Elaboração: RustGIS",
             Bar { title, orientation: Orientation::Horizontal, ticks: 3, side: TickSide::End, reverse: false, comma: false, ink: INK };
         // 100 × 30 px, from y = 10 to 40: a line of title (16.8 px) and the bar's own room
         // (19.8) don't both fit, so no line is drawn.
-        assert_eq!(colorbar_title_drawn(4, 10.0, 40.0 - colorbar_bar_room(1.0), COLORBAR_TITLE_PT as f32 * 1.33), 0);
+        assert_eq!(
+            colorbar_title_drawn(4, 10.0, 40.0 - colorbar_bar_room(1.0, Orientation::Horizontal), COLORBAR_TITLE_PT as f32 * 1.33),
+            0
+        );
         let mut c = Canvas::new(300, 200).unwrap();
         colorbar(&mut c, Rect::from_xywh(10.0, 10.0, 100.0, 30.0).unwrap(), &scale, &bar, 1.0);
         let px = |x: u32, y: u32| c.pixmap().pixel(x, y);
@@ -7345,7 +7385,7 @@ Elaboração: RustGIS",
     /// the first needs 16.8 px and each further one 15 more, over the bar's 19.8.
     #[test]
     fn a_colorbars_title_lines_leave_the_bar_its_room() {
-        let (px, room) = (COLORBAR_TITLE_PT as f32 * 1.33, colorbar_bar_room(1.0));
+        let (px, room) = (COLORBAR_TITLE_PT as f32 * 1.33, colorbar_bar_room(1.0, Orientation::Horizontal));
         for (height, lines) in [(20.0, 0), (36.0, 0), (37.0, 1), (51.2, 1), (52.0, 2), (200.0, 5)] {
             assert_eq!(colorbar_title_drawn(5, 0.0, height - room, px), lines, "{height} px");
         }
