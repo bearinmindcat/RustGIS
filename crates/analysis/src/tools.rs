@@ -3840,6 +3840,7 @@ const ELLIPSOID_STRETCH: f64 = 1.005;
 /// (Leaving out a vertex only shortens a part.) Coordinates are folded and clamped as GeographicLib
 /// takes them, so the bound holds for any finite ones. In a projected system's own plane, the bound
 /// is the edges' flat metres, as the walk adds them up, and a hair more.
+#[expect(clippy::disallowed_methods, reason = "an upper bound, stretched by `ELLIPSOID_STRETCH` to cover the ellipsoid's longer paths")]
 fn length_bound(line: &[Vec<Coord>], ring: bool) -> f64 {
     if let Some(unit) = crate::convert::own_unit_m() {
         let mut verts = line.iter().flatten().filter(|c| c.is_finite());
@@ -5120,16 +5121,17 @@ pub fn layer_raster_crs(crs: Option<Crs>) -> Option<Result<Crs, String>> {
 
 /// The coordinate system an interpolation (`tool`) makes its grid in: the projected system given as
 /// `p`'s `crs`; degrees for `EPSG:4326`; else [`layer_raster_crs`], the projected system `ds` was
-/// read in, as Kernel Density uses, and degrees for a layer read in degrees. The note says what the
-/// run used where that could surprise: the system it took from the layer, or the compatibility note
-/// on the one given.
+/// read in, and degrees for a layer read in degrees. The Geostatistical Wizard and a run in
+/// longitude/latitude take it so; the interpolations and Kernel Density, in a run in a layer's own
+/// projected system, take that one ([`raster_crs_in`]). The note says what the run used where that
+/// could surprise: the system it took from the layer, or the compatibility note on the one given.
 pub fn raster_crs(ds: &Dataset, p: &Json, tool: &str) -> Result<(Crs, Option<String>), String> {
     raster_crs_of(ds.crs, "was read in", &ds.name, p, tool)
 }
 
 /// [`raster_crs`] for a run in `work` ([`Inputs::work_crs`]): a layer held in its own projected
 /// system makes its grid there unless `p` names another.
-fn raster_crs_in(ds: &Dataset, work: Crs, p: &Json, tool: &str) -> Result<(Crs, Option<String>), String> {
+pub fn raster_crs_in(ds: &Dataset, work: Crs, p: &Json, tool: &str) -> Result<(Crs, Option<String>), String> {
     if work == Crs::LonLat {
         raster_crs_of(ds.crs, "was read in", &ds.name, p, tool)
     } else {
@@ -5195,12 +5197,12 @@ pub fn points_in(crs: Crs, pts: Vec<(Coord, f64)>) -> Result<(Vec<(Coord, f64)>,
 
 /// [`points_in`] for points in `from`, a run's own system ([`Inputs::work_crs`]): as they are
 /// when the grid is in it too, else through [`ToGrid`].
-fn points_from(from: Crs, crs: Crs, pts: Vec<(Coord, f64)>) -> Result<(Vec<(Coord, f64)>, Option<String>), String> {
+pub fn points_from(from: Crs, crs: Crs, pts: Vec<(Coord, f64)>) -> Result<(Vec<(Coord, f64)>, Option<String>), String> {
     if from == crs {
         return Ok((pts, None));
     }
     let to = ToGrid::new(from, crs)?;
-    let n = pts.len();
+    let (mut beyond, mut unplaced) = (0usize, 0usize);
     // (In the points' own storage, as a filtered collect of the same kind reuses it.)
     let kept: Vec<(Coord, f64)> = pts
         .into_iter()
@@ -5211,11 +5213,31 @@ fn points_from(from: Crs, crs: Crs, pts: Vec<(Coord, f64)>) -> Result<(Vec<(Coor
             {
                 return Some(Err(cancelled));
             }
-            to.place(c).map(|c| Ok((c, v)))
+            match to.try_place(c) {
+                Ok(c) => Some(Ok((c, v))),
+                Err(Miss::Source) => {
+                    unplaced += 1;
+                    None
+                }
+                Err(Miss::Grid) => {
+                    beyond += 1;
+                    None
+                }
+            }
         })
         .collect::<Result<_, crate::control::Cancelled>>()?;
-    let beyond = n - kept.len();
-    Ok((kept, beyond_note(crs, beyond)))
+    Ok((kept, left_out_note(from, crs, unplaced, beyond)))
+}
+
+/// The note on the points left out: `unplaced` that their own system `from` can't give in
+/// longitude/latitude, and `beyond` that the grid's `crs` can't hold ([`beyond_note`]).
+fn left_out_note(from: Crs, crs: Crs, unplaced: usize, beyond: usize) -> Option<String> {
+    let unplaced =
+        (unplaced > 0).then(|| format!("{unplaced} point(s) that {} can't give in longitude/latitude were left out", from.label()));
+    match (unplaced, beyond_note(crs, beyond)) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    }
 }
 
 /// The note on `beyond` points left out because `crs` can't hold them (see [`in_projected`]).
@@ -5239,6 +5261,14 @@ fn in_projected(crs: Crs, to: &Transformer, c: Coord) -> Option<Coord> {
     // past it through, onto the edge.
     let held = crs != Crs::WebMercator || c.y.abs() <= rustgis_geom::MAX_LAT;
     held.then(|| to.from_lonlat(c)).flatten().filter(|p| p.is_finite() && to.to_lonlat(*p).is_some_and(|back| (back.y - c.y).abs() < 1e-4))
+}
+
+/// Which system a place failed in ([`ToGrid::try_place`]).
+pub(crate) enum Miss {
+    /// The run's own: it can't give the place in longitude/latitude.
+    Source,
+    /// The grid's: it can't hold the place.
+    Grid,
 }
 
 /// Places in a run's own system converted to a grid's system `crs`, as [`in_projected`] takes
@@ -5266,15 +5296,34 @@ impl ToGrid {
     }
 
     pub(crate) fn place(&self, c: Coord) -> Option<Coord> {
+        self.try_place(c).ok()
+    }
+
+    /// [`ToGrid::place`], saying which system failed: the run's, which can't give the place in
+    /// longitude/latitude (a place that isn't finite counts as such, in any run), or the grid's,
+    /// which can't hold it.
+    pub(crate) fn try_place(&self, c: Coord) -> Result<Coord, Miss> {
+        if !c.is_finite() {
+            return Err(Miss::Source);
+        }
         if self.same {
-            return c.is_finite().then_some(c);
+            return Ok(c);
         }
         let lonlat = match &self.from {
-            Some(t) => t.to_lonlat(c)?,
+            Some(t) => t.to_lonlat(c).ok_or(Miss::Source)?,
             None => c,
         };
-        let via = in_projected(self.crs, &self.to, lonlat)?;
-        Some(self.direct.as_ref().map_or(via, |d| d.point_near(c, via)))
+        let via = in_projected(self.crs, &self.to, lonlat).ok_or(Miss::Grid)?;
+        Ok(self.direct.as_ref().map_or(via, |d| d.point_near(c, via)))
+    }
+
+    /// The places of the North and South Pole in the grid's system, those it holds: none when the
+    /// systems are the same.
+    pub(crate) fn poles(&self) -> Vec<Coord> {
+        if self.same {
+            return Vec::new();
+        }
+        [90.0, -90.0].into_iter().filter_map(|lat| in_projected(self.crs, &self.to, Coord::new(0.0, lat))).collect()
     }
 
     /// A polygon's vertex in the grid's system, as the grid's transformer takes a place in
@@ -5436,10 +5485,18 @@ fn kernel_density_tool(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String>
     // A multipoint's members with non-finite coordinates, in the features with finite ones (a
     // feature with none is counted in `skipped`).
     let (mut non_finite, mut non_finite_features) = (0usize, 0usize);
-    let project = |c: Coord, beyond: &mut usize| {
-        let p = to_grid.place(c);
-        *beyond += usize::from(p.is_none());
-        p
+    // And a point the layer's own system can't give in longitude/latitude, counted apart.
+    let mut unplaced = 0usize;
+    let mut project = |c: Coord, beyond: &mut usize| match to_grid.try_place(c) {
+        Ok(p) => Some(p),
+        Err(Miss::Source) => {
+            unplaced += 1;
+            None
+        }
+        Err(Miss::Grid) => {
+            *beyond += 1;
+            None
+        }
     };
     for r in rows(inp, p, "input", ds) {
         let Some(g) = ds.features.get(r).and_then(|f| f.geometry.as_ref()) else {
@@ -5490,7 +5547,7 @@ fn kernel_density_tool(inp: &dyn Inputs, p: &Json) -> Result<ToolResult, String>
         }
     }
 
-    let beyond_note = beyond_note(crs, beyond);
+    let beyond_note = left_out_note(inp.work_crs(), crs, unplaced, beyond);
     let non_finite_note = (non_finite > 0).then(|| {
         format!("{non_finite} point(s) with non-finite coordinates were left out of {non_finite_features} multipoint feature(s) that have other points")
     });
@@ -8239,7 +8296,7 @@ fn zonal_stats_on(inp: &dyn Inputs, p: &Json, threads: Option<usize>) -> Result<
             Ok::<_, String>(match &f.geometry {
                 Some(Geometry::Polygon(polys)) if !polys.is_empty() => {
                     // Checked and taken apart into rings, in the run's system as they are.
-                    match crate::rasterops::transform_feature_polygons_to_lonlat(polys, None) {
+                    match crate::rasterops::validated_polygon_parts(polys) {
                         Ok(rings) => {
                             let mut failed_parts = Vec::new();
                             let st = crate::rasterops::zonal_statistics_from(r, to, &bands, &rings, &mut failed_parts)?;
@@ -11083,6 +11140,7 @@ mod tests {
     /// The distance on WGS 84 (km) from `c` to a line, sampled every `step` metres along it.
     /// Only the samples within 1.2% of the nearest on the sphere are measured on the ellipsoid,
     /// whose distances are within 0.6% of the sphere's.
+    #[expect(clippy::disallowed_methods, reason = "tests sample on the sphere and measure the nearest samples on the ellipsoid")]
     fn km_to_every(c: Coord, line: &[Coord], step: f64) -> f64 {
         let samples: Vec<(Coord, f64)> = line
             .windows(2)
@@ -11147,6 +11205,7 @@ mod tests {
     }
 
     /// Points along the geodesic from `a` to `b` on WGS 84, at most 20 m apart.
+    #[expect(clippy::disallowed_methods, reason = "tests sample on the sphere and measure the nearest samples on the ellipsoid")]
     fn geodesic_samples(a: Coord, b: Coord) -> Vec<Coord> {
         use geo::InterpolatePoint;
         let n = (rustgis_geom::haversine_m(a, b) / 20.0).ceil().max(1.0) as usize;
@@ -11160,6 +11219,7 @@ mod tests {
     /// its nearest point is strictly between the ends: the nearest sample on the sphere (among
     /// every 50th, then its neighbours), then the nearest point on the ellipsoid along the geodesic
     /// either side of it, by golden-section search to well under a millimetre.
+    #[expect(clippy::disallowed_methods, reason = "tests sample on the sphere and measure the nearest samples on the ellipsoid")]
     fn m_to_geodesic(c: Coord, samples: &[Coord]) -> (f64, bool) {
         use geo::InterpolatePoint;
         let near = |range: std::ops::Range<usize>, step: usize| {

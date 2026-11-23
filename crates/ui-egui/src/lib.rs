@@ -24,6 +24,7 @@ mod catalogsui;
 mod chrome;
 mod comets;
 mod completion;
+mod conflictsui;
 mod connectiontree;
 mod connectionui;
 #[cfg(not(target_arch = "wasm32"))]
@@ -3008,7 +3009,7 @@ impl RustGisApp {
             if id == "service.layers" {
                 return readjob::run(self, "service.layers", params);
             }
-            if id == "service.add" && params.get("text").and_then(Value::as_str).is_some() {
+            if id == "service.add" {
                 return readjob::run(self, "service.add", params);
             }
             if id == "layer.repairSource" {
@@ -5434,6 +5435,12 @@ impl RustGisApp {
                     let id = self.session.layer_id(p)?;
                     let form = geometrycalc::Form::new(&self.session, id)?;
                     self.dialogs = dialogs::Dialogs { open: Some("calculateGeometry"), geometry: Some(form), ..Default::default() };
+                    return Ok(Value::Null);
+                }
+                if which == "offlineConflicts" {
+                    let area = p.get("area").and_then(Value::as_str).ok_or_else(|| tl!("Name the offline area.").to_string())?;
+                    let form = conflictsui::Form::new(&self.session, area)?;
+                    self.dialogs = dialogs::Dialogs { open: Some("offlineConflicts"), conflicts: Some(form), ..Default::default() };
                     return Ok(Value::Null);
                 }
                 if matches!(which, "repairSource" | "repairTiles") {

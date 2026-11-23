@@ -143,31 +143,54 @@ pub(crate) fn apply_with<B: Borrow<Feature>>(s: &mut Session, id: u32, changes: 
     }
     let elevation = s.map().editing.settings.elevation.clone();
     // Elevation from a surface: sampled before the layer is borrowed mutably.
-    let z_of = |s: &Session, g: &Geometry| -> Option<f64> {
+    let new_rows: Vec<usize> =
+        if new_defaults { changes.iter().filter(|c| c.before.is_none()).filter_map(|c| c.row).collect() } else { Vec::new() };
+    // The surface is read at the label point of the shape as the layer holds it, placed on the
+    // surface's grid by the direct operation between the two systems (none of it when they are
+    // one), made once for all the new features (a conversion that can't be made refuses only a
+    // feature with a place to read). A label point the surface's system can't give refuses the
+    // edit rather than leave the feature without its `z`; one off the surface, or over no data,
+    // gets none.
+    let (layer_name, layer_crs) = s.map().layer(id).map(|l| (l.name.clone(), l.dataset.coord_crs())).ok_or("no such layer")?;
+    let to_surface = match &elevation {
+        Elevation::Surface(name) if !new_rows.is_empty() => {
+            match surface_layer(s, name).and_then(|l| l.raster.as_ref()?.data.as_ref()).map(|r| r.crs) {
+                Some(crs) if crs != layer_crs => Some(layer_crs.to(crs).map_err(|e| format!("{layer_name}: {e}"))),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let z_of = |s: &Session, g: &Geometry| -> Result<Option<f64>, String> {
         match &elevation {
-            Elevation::None => None,
-            Elevation::Constant(z) => Some(*z),
+            Elevation::None => Ok(None),
+            Elevation::Constant(z) => Ok(Some(*z)),
             Elevation::Surface(name) => {
-                let c = g.label_point()?;
-                let r = surface_layer(s, name)?.raster.as_ref()?.data.as_ref()?;
-                let (col, row) = r.pixel_at(c)?;
-                r.value(0, col, row).map(f64::from)
+                let Some(c) = g.label_point() else { return Ok(None) };
+                let Some(r) = surface_layer(s, name).and_then(|l| l.raster.as_ref()?.data.as_ref()) else { return Ok(None) };
+                let w = match &to_surface {
+                    Some(Err(e)) => return Err(e.clone()),
+                    Some(Ok(to)) => to.point(c).ok_or_else(|| {
+                        format!(
+                            "{layer_name}: this feature's place in {} can't be given in the system of the surface {name}, {}",
+                            layer_crs.label(),
+                            r.crs.label()
+                        )
+                    })?,
+                    None => c,
+                };
+                Ok(r.pixel_at_world(w).and_then(|(col, row)| r.value(0, col, row)).map(f64::from))
             }
         }
     };
-    let new_rows: Vec<usize> =
-        if new_defaults { changes.iter().filter(|c| c.before.is_none()).filter_map(|c| c.row).collect() } else { Vec::new() };
-    // Sampled from a surface at each place in longitude/latitude, from the layer's own coordinates:
-    // a place that can't be converted refuses the edit rather than leave the feature without its
-    // `z`. Without a surface, the place isn't converted. Done before anything below changes the
-    // session, so a refusal leaves it as it was.
+    // Sampled from a surface at each place in the layer's own coordinates (see `z_of`). Done before
+    // anything below changes the session, so a refusal leaves it as it was.
     let mut zs: Vec<(usize, Option<f64>)> = Vec::with_capacity(new_rows.len());
     for r in &new_rows {
-        let stored = s.map().layer(id).and_then(|l| Some((l, l.dataset.features.get(*r)?.geometry.as_ref()?)));
-        let z = match (stored, &elevation) {
-            (None, _) => None,
-            (Some((l, g)), Elevation::Surface(_)) => z_of(s, l.dataset.geometry_to_lonlat(g)?.as_ref()),
-            (Some((_, g)), _) => z_of(s, g),
+        let stored = s.map().layer(id).and_then(|l| l.dataset.features.get(*r)?.geometry.as_ref());
+        let z = match stored {
+            Some(g) => z_of(s, g)?,
+            None => None,
         };
         zs.push((*r, z));
     }
@@ -796,6 +819,10 @@ fn plane_at<'a>(geoms: impl IntoIterator<Item = &'a Geometry>, steps: &mut Cente
             let mut last = a;
             for k in 1..=n as usize {
                 let q = if k as f64 >= n { b } else { at(k as f64 / n) };
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "weighs a centre by its pieces' lengths, not a measurement; polar edits wait on #2032 step C2f-6"
+                )]
                 edges.add_weighted(at((k as f64 - 0.5) / n), haversine_m(last, q));
                 last = q;
             }
@@ -1389,6 +1416,10 @@ fn split(s: &mut Session, p: &Json) -> CmdResult {
         let mut dists: Vec<f64> = Vec::new();
         if ground {
             dists.try_reserve(parts.iter().map(Vec::len).sum()).map_err(|_| "not enough memory to split the selected lines")?;
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "finds the point of a line nearest the cut, a comparison, not a measurement; polar edits wait on #2032 step C2f-6"
+            )]
             dists.extend(
                 parts
                     .iter()
@@ -1442,6 +1473,10 @@ fn split(s: &mut Session, p: &Json) -> CmdResult {
         // nearer than the one found.
         let unsure = d > steps.floor;
         // At a vertex (to within a millimeter), the parts meet there, without it repeated.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "finds the point of a line nearest the cut, a comparison, not a measurement; polar edits wait on #2032 step C2f-6"
+        )]
         let at_end = [part.get(si), part.get(si + 1)].into_iter().flatten().find(|v| rustgis_geom::haversine_m(**v, q) < 0.001);
         let q = at_end.copied().unwrap_or(q);
         let mut first: Vec<Coord> = part.iter().take(si + 1).copied().collect();
@@ -1451,6 +1486,10 @@ fn split(s: &mut Session, p: &Json) -> CmdResult {
         let mut second = vec![q];
         second.extend(part.iter().skip(si + 1).copied().skip_while(|c| *c == q));
         // At (or within a centimetre of) the line's ends isn't a split.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "finds the point of a line nearest the cut, a comparison, not a measurement; polar edits wait on #2032 step C2f-6"
+        )]
         let near = |a: Option<&Coord>| a.is_some_and(|a| rustgis_geom::haversine_m(*a, q) < 0.01);
         if first.len() < 2 || second.len() < 2 || near(first.first()) || near(second.last()) {
             whole += usize::from(unsure);
@@ -1522,6 +1561,10 @@ struct SplitSteps {
 /// a millimeter, nearest first, while it could hold a point nearer than the nearest found, or than
 /// `bound`. Each distance takes one of the command's `steps`; once they're spent, the nearest
 /// found (the nearer end, at first) stands, and `steps` notes how near the rest might be.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finds the point of a line nearest the cut, a comparison, not a measurement; polar edits wait on #2032 step C2f-6"
+)]
 fn nearest_on_ground(at: Coord, (a, b): (Coord, Coord), (da, db): (f64, f64), bound: f64, steps: &mut SplitSteps) -> Option<(f64, Coord)> {
     const STEP_DEG: f64 = 22.5;
     const PIECES_MIN: usize = 8;
@@ -2868,6 +2911,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::disallowed_methods, reason = "the test checks the split's search on the sphere it uses")]
     fn a_split_searches_a_segment_within_its_budget() {
         // From 89°N on 0°, along 88°N from 30°W to 30°E: searched, its nearest point is on 0°, a
         // kilometer nearer than its ends, and the search takes a few dozen of the budget; with

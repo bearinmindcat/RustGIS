@@ -79,7 +79,8 @@ identify and run through tools like any layer; **Load All Features** loads one t
 
 With [GDAL](https://gdal.org) installed (its `ogr2ogr` and `ogrinfo` on the `PATH`, GDAL 3.8 or
 later), the desktop app also reads the vector formats below. Each layer is converted once into a
-cached, indexed FlatGeobuf, so large ones stream too: see [Formats through
+cached, indexed FlatGeobuf in its own coordinate system (or WGS 84, with a notice, when RustGIS
+can't read that system), so large ones stream too: see [Formats through
 GDAL](data.md#formats-through-gdal).
 
 | Format | Extensions or source | Notes |
@@ -618,7 +619,7 @@ server itself: see [PostgreSQL and PostGIS](data.md#postgresql-and-postgis).
 
 | Source | How to add it | Notes |
 | --- | --- | --- |
-| PostGIS table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with a libpq connection string or `postgresql://` address | Large tables read a view at a time by their spatial index, others loaded whole. Converted to longitude/latitude by the server; `"crs"` for geometry that doesn't say. A column of mixed types becomes a layer per type. The password is kept for the session only. |
+| PostGIS table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with a libpq connection string or `postgresql://` address | Large tables read a view at a time by their spatial index, others loaded whole. Kept in the column's own coordinate system when RustGIS knows its SRID (edits are written back in it, with no round trip through longitude/latitude); otherwise converted to longitude/latitude by the server. `"crs"` for geometry that doesn't say. A column of mixed types becomes a layer per type. The password is kept for the session only. |
 
 ## MySQL and MariaDB
 
@@ -627,7 +628,7 @@ database live, talking to the server itself: see [MySQL and MariaDB](data.md#mys
 
 | Source | How to add it | Notes |
 | --- | --- | --- |
-| MySQL or MariaDB table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with a `mysql://user@host:3306/database` or `mariadb://…` address | Large tables read a view at a time by their spatial index, others loaded whole. Converted to longitude/latitude by RustGIS from the column's SRID; `"crs"` for an SRID of 0. A column of mixed types becomes a layer per type. `ssl-mode` sets the encryption. The password is kept for the session only. |
+| MySQL or MariaDB table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with a `mysql://user@host:3306/database` or `mariadb://…` address | Large tables read a view at a time by their spatial index, others loaded whole. Kept in the column's own coordinate system when RustGIS knows its SRID, else treated as longitude/latitude, with a notice; `"crs"` for an SRID of 0. A column of mixed types becomes a layer per type. `ssl-mode` sets the encryption. The password is kept for the session only. |
 
 ## SQL Server and Azure SQL
 
@@ -636,7 +637,7 @@ external client: see [SQL Server and Azure SQL](data.md#sql-server-and-azure-sql
 
 | Source | How to add it | Notes |
 | --- | --- | --- |
-| SQL Server table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with an `mssql://user@host:1433/database` address | Read only; large tables read a view at a time. Geometry and geography, including curves, are converted to longitude/latitude. `"crs"` supplies SRID 0; mixed types become separate layers. TLS and certificate checking are on by default. SQL Server logins on every desktop platform; Windows logins on Windows only. Passwords are kept for the session, never in projects. |
+| SQL Server table or view | Home › Add › Add Data › Database… (`layer.addDatabase`) with an `mssql://user@host:1433/database` address | Read only; large tables read a view at a time. Geometry and geography, including curves, are kept in the column's own coordinate system when RustGIS knows its SRID, else treated as longitude/latitude, with a notice. `"crs"` supplies SRID 0; mixed types become separate layers. TLS and certificate checking are on by default. SQL Server logins on every desktop platform; Windows logins on Windows only. Passwords are kept for the session, never in projects. |
 
 ## SQL queries and DuckDB databases
 
@@ -647,7 +648,7 @@ databases](data.md#sql-queries-and-duckdb-databases).
 
 | Source | How to add it | Notes |
 | --- | --- | --- |
-| SQL query | `layer.addSql` with `"sql"` | One DuckDB `SELECT` with DuckDB Spatial: Parquet, CSV, GeoParquet and `ST_Read` files, web addresses (`https://`, `s3://`). Give `"crs"` for a geometry that doesn't say its coordinate system. |
+| SQL query | `layer.addSql` with `"sql"` | One DuckDB `SELECT` with DuckDB Spatial: Parquet, CSV, GeoParquet and `ST_Read` files, web addresses (`https://`, `s3://`). Give `"crs"` for a geometry that doesn't say its coordinate system. A geometry that says its system, or is given one by its EPSG code, is kept in it; others come in WGS 84. |
 | DuckDB database | `.duckdb`, `.ddb`: Add Data | Every table with a geometry column becomes a layer (`"layer"` picks one). Converted once, until the file changes. |
 
 ## Rasters
@@ -722,10 +723,10 @@ coordinates for degrees. A layer made in RustGIS defaults to WGS 84.
 another, such as `{"layer": "Parcels", "path": "parcels.gpkg", "crs": "EPSG:4647"}`. GeoJSON, KML
 and GPX are always written in WGS 84. CSV is written in WGS 84 (`longitude` and `latitude`) unless
 a `"crs"` is given: a point layer's coordinates are then written in that system, in `longitude`
-and `latitude` columns for a geographic one, and for a projected one in `x` and `y`, or `easting`
-and `northing` when fields have the names `x` or `y`, or `x_1` and `y_1` when fields have all
-four. A notice says which system it is, since a CSV file can't; give the same system when adding
-the file back.
+and `latitude` columns for a geographic one, and for a projected one in an x and a y column. Each
+takes the first name no field has: `x`, then `easting`, then `x_1`, `x_2` and so on, and `y`, then
+`northing`, then `y_1` and so on. A notice says which system it is, since a CSV file can't; give
+the same system when adding the file back.
 
 RustGIS keeps x and y only. When a source has Z or M values (heights or measures), adding it says
 they were dropped, and exporting or converting the layer (or exporting a standalone table that

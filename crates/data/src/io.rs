@@ -2713,8 +2713,13 @@ pub(crate) fn read_rows(
         }
     }
     let (mut bad_wkt, mut zm_rows, mut collection_rows) = (0usize, 0usize, 0usize);
+    let (mut extra_cells, mut extra_rows) = (0usize, 0usize);
     for r in rows {
         crate::progress::step(1)?;
+        // Only header-defined columns are retained below; count actual cells, including empty ones.
+        let extra = r.len().saturating_sub(headers.len());
+        extra_cells += extra;
+        extra_rows += usize::from(extra > 0);
         let cell = |i: usize| r.get(i).map(|s| s.trim()).unwrap_or("");
         let geom = if let Some((x, y)) = xy {
             match cell(x).parse::<f64>().ok().zip(cell(y).parse::<f64>().ok()) {
@@ -2762,6 +2767,15 @@ pub(crate) fn read_rows(
             })
             .collect();
         ds.push_next(geom, attrs);
+    }
+    if extra_cells > 0 {
+        let cells = if extra_cells == 1 { "cell" } else { "cells" };
+        let was = if extra_cells == 1 { "was" } else { "were" };
+        let rows = if extra_rows == 1 { "row" } else { "rows" };
+        let columns = if headers.len() == 1 { "column" } else { "columns" };
+        report
+            .messages
+            .push(format!("{extra_cells} {cells} past the header's {} {columns} {was} omitted in {extra_rows} {rows}", headers.len()));
     }
     ds.drop_zm(&mut report, zm_rows);
     if collection_rows > 0 {
@@ -4577,6 +4591,12 @@ pub struct CsvLosses {
 impl CsvLosses {
     /// The losses of `features` in a layer of type `gt`; a streamed export adds up its chunks'.
     pub fn of(features: &[crate::Feature], gt: GeometryType, fields: &[Field]) -> Result<Self> {
+        Self::of_placed(features, gt, fields, &|c| Some(c))
+    }
+
+    /// As [`CsvLosses::of`], for features whose points are written where `place` puts them (in
+    /// another system): only the points are converted, not the features.
+    fn of_placed(features: &[crate::Feature], gt: GeometryType, fields: &[Field], place: &dyn Fn(Coord) -> Option<Coord>) -> Result<Self> {
         let mut out = Self { points: gt == GeometryType::Point, guarded: vec![0; fields.len()], ..Self::default() };
         for feature in features {
             crate::progress::check()?;
@@ -4585,7 +4605,7 @@ impl CsvLosses {
             }
             let geometry = feature.geometry.as_ref();
             let point = if out.points { geometry.and_then(Geometry::label_point) } else { None };
-            if out.points && !point.is_some_and(usable_degree_point) {
+            if out.points && !point.and_then(place).is_some_and(usable_degree_point) {
                 out.unusable_points += 1;
             }
             let Some(g) = geometry else { continue };
@@ -4651,8 +4671,15 @@ impl CsvLosses {
             let [x, y] = csv_projected_names(fields);
             let target: String = target.chars().map(dbf_notice_char).collect();
             return (x != "x" && x != "easting" || y != "y" && y != "northing").then(|| {
+                // The names that moved the columns: each axis's two, when both are taken.
+                let names: Vec<String> = [(x != "x" && x != "easting", ["x", "easting"]), (y != "y" && y != "northing", ["y", "northing"])]
+                    .into_iter()
+                    .filter(|(moved, _)| *moved)
+                    .flat_map(|(_, names)| names.map(|n| format!("'{n}'")))
+                    .collect();
                 format!(
-                    "{target}: the fields have the names 'x', 'y', 'easting' and 'northing', so the coordinates are in columns '{}' and '{}'; pick those columns when adding the file back",
+                    "{target}: the fields have the names {}, so the coordinates are in columns '{}' and '{}'; pick those columns when adding the file back",
+                    names.join(" and ").replacen(" and ", ", ", names.len().saturating_sub(2)),
                     dbf_notice_name(&x),
                     dbf_notice_name(&y)
                 )
@@ -4982,15 +5009,18 @@ pub fn export_losses_notes(ds: &Dataset, ext: &str, name_field: Option<usize>, t
 pub fn export_losses_notes_in(ds: &Dataset, ext: &str, name_field: Option<usize>, target: &str, crs: Crs) -> Result<Vec<String>> {
     let mut notes = match ext {
         "csv" => {
-            // Of the coordinates the file is written in: longitude/latitude, or another system's.
-            let ds = if crs == Crs::LonLat {
-                ds.in_lonlat().map_err(DataError::of_conversion)?
-            } else if crs == ds.coord_crs() {
-                std::borrow::Cow::Borrowed(ds)
+            // Of the coordinates the file is written in: longitude/latitude, or another
+            // geographic system's, whose points alone are converted to be checked (no copy of the
+            // layer); a projected system's aren't degrees, so aren't checked as such.
+            let losses = if crs == Crs::LonLat {
+                let ds = ds.in_lonlat().map_err(DataError::of_conversion)?;
+                CsvLosses::of(&ds.features, ds.geometry_type, &ds.fields)?
+            } else if crs.is_geographic() && crs != ds.coord_crs() {
+                let to = ds.coord_crs().to(crs).map_err(DataError::Format)?;
+                CsvLosses::of_placed(&ds.features, ds.geometry_type, &ds.fields, &|c| to.point(c))?
             } else {
-                std::borrow::Cow::Owned(project(ds, crs)?)
+                CsvLosses::of(&ds.features, ds.geometry_type, &ds.fields)?
             };
-            let losses = CsvLosses::of(&ds.features, ds.geometry_type, &ds.fields)?;
             let mut notes = losses.notes(&ds.fields, target);
             notes.extend(losses.coordinates_note_in(&ds.fields, target, crs));
             notes
@@ -5487,6 +5517,29 @@ pub(crate) fn group_rings(rings: Vec<(Vec<Coord>, bool)>) -> Geometry {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Each extra cell is counted, including empty ones, and each affected row once, preserving named data.
+    #[test]
+    fn csv_extra_cells_are_counted() {
+        for (text, expected) in [
+            ("wkt,id,note\nPOINT(1 2),7,kept\nPOINT(3 4),8,\n", vec![]),
+            (
+                "wkt,id,note\nPOINT(1 2),7,kept,lost,\nPOINT(3 4),8,,tail\n",
+                vec!["3 cells past the header's 3 columns were omitted in 2 rows"],
+            ),
+            ("wkt,id,note\nPOINT(1 2),7,kept,\nPOINT(3 4),8,\n", vec!["1 cell past the header's 3 columns was omitted in 1 row"]),
+        ] {
+            let (ds, report) = read_csv(text, "extra").unwrap();
+            assert_eq!(ds.fields, [Field::new("id", FieldType::Integer), Field::new("note", FieldType::Text)]);
+            assert_eq!(ds.features.len(), 2);
+            assert_eq!(ds.features[0].geometry, Some(Geometry::Point(Coord::new(1.0, 2.0))));
+            assert_eq!(ds.features[1].geometry, Some(Geometry::Point(Coord::new(3.0, 4.0))));
+            assert_eq!(ds.features[0].attrs, [Value::Int(7), Value::Text("kept".into())]);
+            assert_eq!(ds.features[1].attrs, [Value::Int(8), Value::Null]);
+            assert_eq!(report.skipped, 0);
+            assert_eq!(report.messages, expected);
+        }
+    }
 
     /// A file refused because RustGIS holds much of the memory says so, with the limit when nothing
     /// is held and what to do; refused at the full limit, or where the limit doesn't follow the

@@ -347,12 +347,12 @@ pub fn commands() -> Vec<C> {
         C::new("layer.lineStrokes", "Line Strokes", "Style › Drawing", line_strokes).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_lines_or_points)
             .params(
-                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack), "dash"?: [points, …]|null (dash, gap, … in turn, at most 8; null: solid), "markers"?: {"mark"?: "circle"|"square"|"triangle"|"diamond"|"star"|"character"|"image"|"hash" (a mark across the line), "char"?: text (a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the stroke's colour and the outline don't show), "size"?: points (a marker's size, a hash mark's length; default 4), "at"?: "interval"|"vertices"|"innerVertices"|"first"|"last"|"middle"|"segmentMiddles" or a list of them (default "interval"), "interval"?: points (default 12), "offsetAlong"?: points (from the start, back from the end, on from the middle), "rotate"?: bool (turned with the line; default true), "averageAngle"?: points (the stretch of line a marker at an interval turns with; 0: its segment), "angle"?: degrees clockwise (a hash mark at 0 crosses the line square), "outline"?: "#RRGGBB"|"#RRGGBBAA" (the markers' outline, as wide as the stroke)}|null (markers or hash marks along the line in the stroke's colour, instead of a line; cap, join and dash don't apply)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes; on a point layer they are its marks: each stroke's markers drawn at the point in place of the symbol's, "offsetAlong" shifting a mark right and "offset" down, both turned with its "angle", and "rotate" turning it by layer.markerRotation's field), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
+                r##"{"layer"?, "strokes": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the renderer's line colour), "width"?: points|null (null: the renderer's width), "offset"?: points (positive: right of the line's direction, negative: left), "cap"?: "round"|"flat"|"square", "join"?: "round"|"miter"|"bevel", "level"?: 0..255|null (with layer.strokeLevels: the level it draws at; null: its place in the stack), "dash"?: [points, …]|null (dash, gap, … in turn, at most 8; null: solid), "markers"?: {"mark"?: "circle"|"square"|"triangle"|"diamond"|"star"|"character"|"image"|"hash" (a mark across the line), "char"?: text (a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (a PNG, JPEG or SVG image as base64 of at most 2 MiB and 2048 × 2048 pixels (an SVG: as much to draw, with no filters, text, images, animation or links to other files), as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the stroke's colour and the outline don't show), "size"?: points (a marker's size, a hash mark's length; default 4), "at"?: "interval"|"vertices"|"innerVertices"|"first"|"last"|"middle"|"segmentMiddles" or a list of them (default "interval"), "interval"?: points (default 12), "offsetAlong"?: points (from the start, back from the end, on from the middle), "rotate"?: bool (turned with the line; default true), "averageAngle"?: points (the stretch of line a marker at an interval turns with; 0: its segment), "angle"?: degrees clockwise (a hash mark at 0 crosses the line square), "outline"?: "#RRGGBB"|"#RRGGBBAA" (the markers' outline, as wide as the stroke)}|null (markers or hash marks along the line in the stroke's colour, instead of a line; cap, join and dash don't apply)}] (drawn bottom first; [] goes back to the single stroke, or for a class to the layer's strokes; on a point layer they are its marks: each stroke's markers drawn at the point in place of the symbol's, "offsetAlong" shifting a mark right and "offset" down, both turned with its "angle", and "rotate" turning it by layer.markerRotation's field), "value"?: text|number (a Unique Values class's own strokes), "index"?: number (a Graduated Colors class's, 0 = the lowest), "other"?: true (Unique Values' <all other values>)}"##,
             ),
         C::new("layer.fillLayers", "Fill Layers", "Style › Drawing", fill_layers).roles(&[]).effects(crate::policy::Effects::NONE)
             .when(need_polygon_features)
             .params(
-                r##"{"layer"?, "value"?|"index"?|"other"?: a class of Unique Values (its value, or other: true) or Graduated Colors (its index) to set its own fills (none: the layer's), "fills": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the feature's fill colour, so the fills follow the classes), "pattern"?: "solid" (default)|"hatch" (parallel lines)|"dots" (markers on a grid)|"gradient" (from color to color2 across the feature)|"shapeburst" (from color at the edge to color2 inside), "angle"?: degrees anticlockwise from east (hatch), "spacing"?: points between lines (hatch, 1 to 500; default 8) or points across and down between markers, a number or [across, down] (dots), "width"?: a hatch line's width in points (0 to 50; default 1), "offset"?: points across the lines (hatch) or [across, down] (dots), "marker"?: "circle"|"square"|"triangle"|"diamond"|"star"|"image" (dots), "char"?: text (dots: a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (dots: a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the colour and the outline don't show), "size"?: a marker's size in points (default 3), "outline"?: a marker's outline colour or null, "outlineWidth"?: points, "displacement"?: [across, down] points every other row and column are shifted by (dots), "color2"?: "#RRGGBB"|"#RRGGBBAA" (gradient, shapeburst: the second colour; default white), "stops"?: [[0..1, "#RRGGBB"|"#RRGGBBAA"], …] (gradient, shapeburst: colours between the two, at most 16), "discrete"?: bool (each colour held until the next stop), "shape"?: "linear" (default)|"radial"|"conical" (gradient), "from"?: [across, down]|"centroid" (gradient: where color is, 0..1 in the feature's box; default [0.5, 0], the top middle), "to"?: [across, down]|"centroid" (where color2 is; default [0.5, 1]), "spread"?: "pad" (default)|"reflect"|"repeat" (gradient: past its points), "angle"?: degrees anticlockwise (gradient: turned round its box's middle), "inView"?: bool (gradient: from and to in the map view's box, not the feature's), "distance"?: points|null (shapeburst: how deep it shades; null or none: to the point deepest inside), "blur"?: 0..17 (shapeburst: pixels), "ignoreRings"?: bool (shapeburst: holes' edges left out)}] (bottom first, at most 8; [] for the symbol's single fill; the outline is drawn over them)}"##,
+                r##"{"layer"?, "value"?|"index"?|"other"?: a class of Unique Values (its value, or other: true) or Graduated Colors (its index) to set its own fills (none: the layer's), "fills": [{"color"?: "#RRGGBB"|"#RRGGBBAA"|null (null: the feature's fill colour, so the fills follow the classes), "pattern"?: "solid" (default)|"hatch" (parallel lines)|"dots" (markers on a grid)|"gradient" (from color to color2 across the feature)|"shapeburst" (from color at the edge to color2 inside), "angle"?: degrees anticlockwise from east (hatch), "spacing"?: points between lines (hatch, 1 to 500; default 8) or points across and down between markers, a number or [across, down] (dots), "width"?: a hatch line's width in points (0 to 50; default 1), "offset"?: points across the lines (hatch) or [across, down] (dots), "marker"?: "circle"|"square"|"triangle"|"diamond"|"star"|"image" (dots), "char"?: text (dots: a character of a font as the marker instead of a shape), "font"?: text (the installed family it is drawn from; none: the label font), "image"?: text (dots: a PNG, JPEG or SVG image as base64 of at most 2 MiB and 2048 × 2048 pixels (an SVG: as much to draw, with no filters, text, images, animation or links to other files), as the marker instead of a shape: as wide as its size, as tall as its proportions make it; the colour and the outline don't show), "size"?: a marker's size in points (default 3), "outline"?: a marker's outline colour or null, "outlineWidth"?: points, "displacement"?: [across, down] points every other row and column are shifted by (dots), "color2"?: "#RRGGBB"|"#RRGGBBAA" (gradient, shapeburst: the second colour; default white), "stops"?: [[0..1, "#RRGGBB"|"#RRGGBBAA"], …] (gradient, shapeburst: colours between the two, at most 16), "discrete"?: bool (each colour held until the next stop), "shape"?: "linear" (default)|"radial"|"conical" (gradient), "from"?: [across, down]|"centroid" (gradient: where color is, 0..1 in the feature's box; default [0.5, 0], the top middle), "to"?: [across, down]|"centroid" (where color2 is; default [0.5, 1]), "spread"?: "pad" (default)|"reflect"|"repeat" (gradient: past its points), "angle"?: degrees anticlockwise (gradient: turned round its box's middle), "inView"?: bool (gradient: from and to in the map view's box, not the feature's), "distance"?: points|null (shapeburst: how deep it shades; null or none: to the point deepest inside), "blur"?: 0..17 (shapeburst: pixels), "ignoreRings"?: bool (shapeburst: holes' edges left out)}] (bottom first, at most 8; [] for the symbol's single fill; the outline is drawn over them)}"##,
             ),
         C::new("layer.markerRotation", "Marker Rotation", "Style › Drawing", |s, p| {
             let field = match p.get("field") {
@@ -448,7 +448,7 @@ pub fn commands() -> Vec<C> {
             })
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_feature_layer)
-        .params(r#"{"layer"?, "shape"?: "circle"|"square"|"triangle"|"diamond"|"star", "char"?: text (a character of a font as the marker, its first; sized by the font's em), "font"?: text (the installed family the character is drawn from; "" or one not installed: the label font), "image"?: text (a PNG or JPEG image as base64 of at most 2 MiB and 2048 × 2048 pixels, as the marker: as wide as the size, as tall as its proportions make it; its fill and outline don't show), "size"?: number}"#),
+        .params(r#"{"layer"?, "shape"?: "circle"|"square"|"triangle"|"diamond"|"star", "char"?: text (a character of a font as the marker, its first; sized by the font's em), "font"?: text (the installed family the character is drawn from; "" or one not installed: the label font), "image"?: text (a PNG, JPEG or SVG image as base64 of at most 2 MiB and 2048 × 2048 pixels (an SVG: as much to draw, with no filters, text, images, animation or links to other files), as the marker: as wide as the size, as tall as its proportions make it; its fill and outline don't show), "size"?: number}"#),
         C::new("layer.transparency", "Transparency", "Style › Effects", |s, p| {
             let t = f(p, "value").ok_or("value (0–100) is required")?.clamp(0.0, 100.0) as f32;
             with(s, p, |l| l.transparency = t)
@@ -641,7 +641,7 @@ pub fn commands() -> Vec<C> {
             })
         }).roles(&[]).effects(crate::policy::Effects::NONE)
         .when(need_feature_layer)
-        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "haloColor"?: "#RRGGBB"|"#RRGGBBAA"|"" (""/null: white or dark, whichever stands out from the text), "haloWidth"?: points 0-10|null (null: the thin halo), "spacing"?: points between letters (-5 to 50), "stretch"?: share of a line's room, 0.1 to 1, a label placed curved with "fit": "auto" spreads its letters over when the line has room to spare (null: 0.6), "bold"?: bool, "italic"?: bool, "font"?: installed family name (labels.fonts lists them; "" is the label font), "background"?: false|null (none) | true (white, a thin dark outline) | {"fill"?: "#RRGGBB"|"#RRGGBBAA"|"" ("": none), "stroke"?: colour|"" (the outline; "": none), "strokeWidth"?: points 0-10, "padding"?: [across, up and down] points 0-50, "radius"?: corner radius in points 0-50} (a rectangle behind the text; what isn't given is kept, or the default's), "wrapChar"?: text (a line break wherever it occurs, left out; a space puts each word on its own line; "" for none), "wrapLength"?: characters (a longest line, broken between words; 0 for none; at most 500), "lineAlign"?: "left"|"center"|"right" (how a label's lines line up)}"##),
+        .params(r##"{"layer"?, "class"?: name (none: the Default class, by whatever name it has), "size"?: number, "color"?: "#RRGGBB"|"#RRGGBBAA", "halo"?: bool, "haloColor"?: "#RRGGBB"|"#RRGGBBAA"|"" (""/null: white or dark, whichever stands out from the text), "haloWidth"?: points 0-10|null (null: the thin halo), "spacing"?: points between letters (-5 to 50), "stretch"?: share of a line's room, 0.1 to 1: a label placed curved with "fit": "auto" spreads its letters over it when the line has room to spare (null: 0.6); any other curved label (along a line, a polygon's centre line or a guide line) is letter-spaced to cover it, within spacing's range (null: its spacing), "bold"?: bool, "italic"?: bool, "font"?: installed family name (labels.fonts lists them; "" is the label font), "background"?: false|null (none) | true (white, a thin dark outline) | {"fill"?: "#RRGGBB"|"#RRGGBBAA"|"" ("": none), "stroke"?: colour|"" (the outline; "": none), "strokeWidth"?: points 0-10, "padding"?: [across, up and down] points 0-50, "radius"?: corner radius in points 0-50} (a rectangle behind the text; what isn't given is kept, or the default's), "wrapChar"?: text (a line break wherever it occurs, left out; a space puts each word on its own line; "" for none), "wrapLength"?: characters (a longest line, broken between words; 0 for none; at most 500), "lineAlign"?: "left"|"center"|"right" (how a label's lines line up)}"##),
         C::new("layer.definitionQuery", "Definition Query", "Data › Definition Query", |s, p| {
             let q = ps(p, "where").map(str::trim).unwrap_or("").to_string();
             let id = s.layer_id(p)?;
@@ -1655,18 +1655,18 @@ fn image_alone(o: &serde_json::Map<String, Value>, key: &str) -> Result<(), Stri
 /// is weighed against it.
 fn not_empty(image: Option<&Value>) -> Result<(), String> {
     if image.and_then(Value::as_str).is_some_and(|b64| b64.trim().is_empty()) {
-        return Err("image is empty: give a PNG or JPEG image as base64, or leave it out".into());
+        return Err("image is empty: give a PNG, JPEG or SVG image as base64, or leave it out".into());
     }
     Ok(())
 }
 
-/// An `image` (`layer.marker`'s, a line marker's, a dot fill's): a PNG or JPEG image as base64,
-/// which must decode. One kept already is returned where it draws; a new one is only checked, its
-/// base64 put in `new` and an empty picture returned in its place, for [`keep_pictures`] to keep
-/// once the whole call is checked: a call refused for a later stroke or fill keeps none of its
-/// images.
+/// An `image` (`layer.marker`'s, a line marker's, a dot fill's): a PNG, JPEG or SVG image as
+/// base64, which must decode. One kept already is returned where it draws; a new one is only
+/// checked, its base64 put in `new` and an empty picture returned in its place, for
+/// [`keep_pictures`] to keep once the whole call is checked: a call refused for a later stroke or
+/// fill keeps none of its images.
 fn picture<'a>(p: &'a Value, new: &mut Vec<&'a str>) -> Result<Option<Picture>, String> {
-    const WHAT: &str = "image is a PNG or JPEG image as base64, of at most 2048 × 2048 pixels";
+    const WHAT: &str = "image is a PNG, JPEG or SVG image as base64, of at most 2048 × 2048 pixels or as much to draw";
     let b64 = match p.get("image") {
         None | Some(Value::Null) => return Ok(None),
         Some(Value::String(b64)) => b64.trim(),
@@ -2067,14 +2067,12 @@ fn add_data(s: &mut Session, p: &Value) -> CmdResult {
     if rustgis_data::source::is_source_name(path) {
         return add_source(s, p, Origin::Path(path), None);
     }
-    // A CityJSON model named .json, in the coordinate system given or with a layer picked: as a
-    // .city.json, all its layers (a .city.json is added below, as a file of several layers). It is
-    // read whole to tell, here on the calling thread, so only up to the size every computer reads
-    // (a larger model is named `.city.json` to be read as one).
+    // Only a possible city model is read whole; ordinary GeoJSON keeps its streaming path.
     if path.to_ascii_lowercase().ends_with(".json")
         && !rustgis_data::cityjson::is_cityjson_name(path)
         && ["crs", "layer"].iter().any(|k| ps(p, k).is_some_and(|c| !c.trim().is_empty()))
         && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= rustgis_data::io::BYTES_FLOOR)
+        && may_be_city_model_path(path)
     {
         let bytes = rustgis_data::provenance::read(path).map_err(|e| format!("{path}: {e}"))?;
         if rustgis_data::io::is_cityjson(path, &bytes) {
@@ -2602,9 +2600,8 @@ fn in_place_key(path: &str, crs: Option<&str>) -> String {
 /// The opening of a large Shapefile or GeoJSON file that Add Data reads in place, made ahead on a
 /// thread of its own (#2446): it reads the whole file once, to index a Shapefile's records or
 /// find a GeoJSON file's features, which takes minutes for a file of millions. As [`add_data`]
-/// decides ([`streams_geojson`], [`streams_shapefile`]), but a `.json` of at most 256 MiB given a
-/// coordinate system or a layer, which may be a city model told as it is added, so it is opened
-/// there as before.
+/// decides ([`streams_geojson`], [`streams_shapefile`]); a possible city model is sniffed from
+/// its head and left for the city-model path.
 /// Cancel is looked at every few thousand features or records; reading a GeoJSON file of at most
 /// 256 MiB into memory, before its text is scanned, is one step without a look.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2615,11 +2612,11 @@ fn in_place_ahead(p: &Value, path: &str) -> Option<super::reads::ReadWork> {
     let given = |k: &str| ps(p, k).is_some_and(|v| !v.trim().is_empty());
     if is_geojson(path)
         && !rustgis_data::cityjson::is_cityjson_name(path)
-        // Up to the size every computer reads, add_data reads such a .json whole first to tell a
-        // city model; a larger one it opens in place, as here.
+        // Match add_data's bounded city-model probe before opening GeoJSON in place.
         && !(lower.ends_with(".json")
             && (given("crs") || given("layer"))
-            && std::fs::metadata(path).is_ok_and(|m| m.len() <= rustgis_data::io::BYTES_FLOOR))
+            && std::fs::metadata(path).is_ok_and(|m| m.len() <= rustgis_data::io::BYTES_FLOOR)
+            && may_be_city_model_path(path))
         && streams_geojson(p, path)
     {
         let (path, may_load) = (path.to_string(), b(p, "stream").is_none());
@@ -2652,8 +2649,8 @@ fn in_place_ahead(p: &Value, path: &str) -> Option<super::reads::ReadWork> {
 /// Shapefile or GeoJSON file opened in place ([`in_place_ahead`]), or a standalone dBASE table.
 /// `None` for any other file, which [`add_data`] reads as it adds it. Each is picked only where
 /// `add_data` takes that read, so a read made is never wasted; a few it makes whole are left to it
-/// (a `.json` with a coordinate system or layer given, a large GeoJSON that isn't a
-/// FeatureCollection).
+/// (a possible CityJSON `.json` with a coordinate system or layer given, or a large GeoJSON
+/// that isn't a FeatureCollection).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn add_data_ahead(p: &Value) -> Option<super::reads::ReadWork> {
     use super::reads::ahead;
@@ -2697,11 +2694,11 @@ pub(crate) fn add_data_ahead(p: &Value) -> Option<super::reads::ReadWork> {
     let lower = path.to_ascii_lowercase();
     // A GeoJSON read whole: small with no "stream" given (which add_data decides by), or any size
     // (within the reader's limit) with `"stream": false`; and not a CityJSON model (named so, or a
-    // .json with a coordinate system or a layer given).
+    // .json whose head could identify CityJSON, with a coordinate system or a layer given).
     let geojson = is_geojson(&path)
         && !rustgis_data::cityjson::is_cityjson_name(&path)
         && b(p, "stream") != Some(true)
-        && !(lower.ends_with(".json") && (given("crs") || given("layer")))
+        && !(lower.ends_with(".json") && (given("crs") || given("layer")) && may_be_city_model_path(&path))
         && std::fs::metadata(&path)
             .is_ok_and(|m| m.is_file() && (b(p, "stream") == Some(false) || m.len() <= rustgis_data::source::geojson::IN_PLACE_ABOVE));
     // A ZIP, a city model, a GML or a GPX file: its layers, read whole. A model named `.json` (not
@@ -3130,11 +3127,11 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
         let layers = rustgis_data::dxf::layers(path, &bytes).map_err(err)?;
         return Ok(json!({"count": layers.len(), "layers": layers}));
     }
-    // A CityJSON model named .json: all its layers, as Add Data adds them by name. Read whole to
-    // tell, so only up to the size every computer reads, as Add Data does.
+    // Sniff a plain .json before considering a whole-file city-model read.
     let crs = ps(p, "crs").map(str::trim).filter(|c| !c.is_empty());
     let model_json = path.to_ascii_lowercase().ends_with(".json")
-        && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= rustgis_data::io::BYTES_FLOOR);
+        && std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= rustgis_data::io::BYTES_FLOOR)
+        && may_be_city_model_path(path);
     if rustgis_data::io::is_multi_layer_name(path) || model_json {
         let meta = std::fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
         // Listed within the size Add Data takes it at.
@@ -3173,6 +3170,54 @@ fn file_layers(s: &mut Session, p: &Value) -> CmdResult {
     }
     let name = Path::new(path).file_stem().and_then(|n| n.to_str()).unwrap_or("layer");
     Ok(json!({"count": 1, "layers": [name]}))
+}
+
+/// Reads at most 64 KiB to route a plain .json without allocating the whole file.
+/// An inconclusive head keeps the existing whole-file fallback (within its size cap), so a
+/// CityJSON root type after a large metadata value or extension member still works. A root type
+/// or CityObjects key lets us stop before its payload. A features key alone is inconclusive:
+/// CityJSON permits extension members, and its root type may follow them.
+fn may_be_city_model_path(path: &str) -> bool {
+    use std::io::Read;
+    let mut head = Vec::new();
+    match rustgis_data::provenance::open(path).and_then(|f| f.take(64 << 10).read_to_end(&mut head)) {
+        Ok(_) => json_city_model_head(&head),
+        Err(_) => true, // The existing reader reports the I/O error.
+    }
+}
+
+/// Inspects root keys only; nested properties and strings cannot identify a city model.
+fn json_city_model_head(head: &[u8]) -> bool {
+    use serde::Deserializer;
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+    struct Head<'a>(&'a std::cell::Cell<Option<bool>>);
+    impl<'de> Visitor<'de> for Head<'_> {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON document's root object")
+        }
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<bool, M::Error> {
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "type" => self.0.set(Some(map.next_value::<String>()? == "CityJSON")),
+                    "CityObjects" => self.0.set(Some(true)),
+                    _ => {
+                        map.next_value::<IgnoredAny>()?;
+                        continue;
+                    }
+                }
+                // Stop without consuming the payload. serde otherwise requires the closing
+                // brace after visit_map; the decision deliberately survives this sentinel error.
+                return Err(serde::de::Error::custom("JSON format decided"));
+            }
+            self.0.set(Some(false));
+            Ok(false)
+        }
+    }
+    let head = head.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(head);
+    let decided = std::cell::Cell::new(None);
+    let _ = serde_json::Deserializer::from_slice(head).deserialize_map(Head(&decided));
+    decided.get().unwrap_or(true)
 }
 
 /// Whether a file name is GeoJSON's (`.geojson` or `.json`).
@@ -3245,6 +3290,14 @@ fn add_source_read(
     let mut skipped: Vec<String> = Vec::new();
     let mut total = None;
     let selected = ps(p, "layer").map(str::trim).filter(|t| !t.is_empty());
+    // A desktop upload is copied once; inspection and opening share its SQLite connection.
+    #[cfg(not(target_arch = "wasm32"))]
+    let upload = match &origin {
+        Origin::Bytes(name, bytes) if name.to_ascii_lowercase().ends_with(".gpkg") && opened.is_none() => {
+            Some(source::gpkg::GpkgUpload::new(bytes.as_slice()).map_err(err)?)
+        }
+        _ => None,
+    };
     // Report unsupported contents for a whole-file add, not a deliberate table selection.
     let contents = match (&origin, selected.is_none()) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -3252,9 +3305,10 @@ fn add_source_read(
             source::gpkg::unsupported_table_counts(Path::new(path)).map_err(err)?
         }
         #[cfg(not(target_arch = "wasm32"))]
-        (Origin::Bytes(name, bytes), true) if name.to_ascii_lowercase().ends_with(".gpkg") => {
-            source::gpkg::unsupported_table_counts_bytes(bytes.as_slice()).map_err(err)?
-        }
+        (Origin::Bytes(name, bytes), true) if name.to_ascii_lowercase().ends_with(".gpkg") => match &upload {
+            Some(upload) => upload.unsupported_table_counts().map_err(err)?,
+            None => source::gpkg::unsupported_table_counts_bytes(bytes.as_slice()).map_err(err)?,
+        },
         #[cfg(target_arch = "wasm32")]
         (Origin::Bytes(name, bytes), true) if name.to_ascii_lowercase().ends_with(".gpkg") => {
             source::gpkg_mem::unsupported_table_counts(source::Shared(bytes.clone())).map_err(err)?
@@ -3274,6 +3328,13 @@ fn add_source_read(
         })
         .collect();
     let attribute_note = (!omitted.is_empty()).then(|| omitted.join("; "));
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(upload) = upload {
+        opened = Some(Box::new(upload.open(selected).map_err(|e| match &attribute_note {
+            Some(note) => format!("{}; {note}", err(e)),
+            None => err(e),
+        })?));
+    }
     let tables: Vec<Option<String>> = match (selected, &origin) {
         (Some(t), _) => vec![Some(t.to_string())],
         (None, Origin::Path(path)) if path.to_ascii_lowercase().ends_with(".gpkg") => {
@@ -3285,8 +3346,8 @@ fn add_source_read(
             all.into_iter().map(Some).collect()
         }
         // In the browser an uploaded GeoPackage adds every table, listed by the pure-Rust reader.
-        // (The desktop opens uploads with SQLite, one temporary copy per table, so it adds the
-        // first; files on disk add them all.)
+        // The desktop adds the first feature table from one private SQLite copy shared with
+        // inspection, reporting other tables through the source notes; files on disk add all.
         #[cfg(target_arch = "wasm32")]
         (None, Origin::Bytes(name, bytes)) if name.to_ascii_lowercase().ends_with(".gpkg") => {
             let mut all = source::gpkg_mem::layers(source::Shared(bytes.clone())).map_err(err)?;
@@ -3520,6 +3581,7 @@ pub(crate) fn gdal_parts(mut converted: Vec<rustgis_data::source::gdal::Converte
             path: c.path,
             name: c.name,
             unprojected: c.unprojected,
+            in_lonlat: c.in_lonlat,
             zm_dropped: false,
             origin: ConvertedOrigin::Gdal(rustgis_map::source::GdalOrigin {
                 path: original.to_string(),
@@ -4295,6 +4357,7 @@ pub(crate) fn duckdb_parts(
             // A geometry that says no coordinate system is usually longitude/latitude: only
             // coordinates past it are pointed out (in add_converted).
             unprojected: false,
+            in_lonlat: false,
             zm_dropped: part.zm_dropped > 0,
             origin: ConvertedOrigin::Duckdb(origin(part.family)),
         })
@@ -4308,6 +4371,8 @@ pub(crate) struct Converted {
     name: String,
     /// Its coordinates are the source's own, in a coordinate system it doesn't say.
     unprojected: bool,
+    /// Its coordinate system is one RustGIS can't read, so it was converted to longitude/latitude.
+    in_lonlat: bool,
     /// The conversion dropped Z or M values (said as it ran), kept with the layer so an export
     /// says so too.
     zm_dropped: bool,
@@ -4329,6 +4394,11 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
     let parts = converted.len();
     let single = parts == 1;
     let (mut ids, mut features, mut streamed) = (Vec::new(), 0u64, false);
+    let mut converted_lonlat: Vec<String> = Vec::new();
+    let source_layer = |o: &ConvertedOrigin| match o {
+        ConvertedOrigin::Gdal(g) => g.layer.clone(),
+        ConvertedOrigin::Duckdb(d) => d.table.clone().unwrap_or_default(),
+    };
     for c in converted {
         let mut q = json!({"name": c.name});
         if let Some(n) = ps(p, "name").filter(|_| single) {
@@ -4382,6 +4452,13 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
             // its coordinate system is unknown.
             let e = s.map().layer(id).map(|l| l.extent()).unwrap_or_default();
             let outside = !e.is_empty() && (e.min_x < -181.0 || e.max_x > 181.0 || e.min_y < -91.0 || e.max_y > 91.0);
+            // Said once for the file below, naming each source layer once, not each part of it.
+            if c.in_lonlat {
+                let layer = source_layer(&c.origin);
+                if !converted_lonlat.contains(&layer) {
+                    converted_lonlat.push(layer);
+                }
+            }
             if outside || (c.unprojected && matches!(c.origin, ConvertedOrigin::Gdal(_))) {
                 s.notify(
                     format!("{}: the data doesn't say its coordinate system; add it again with \"crs\" (such as EPSG:2263)", c.name),
@@ -4390,6 +4467,10 @@ pub(crate) fn add_converted(s: &mut Session, p: &Value, label: &str, original: &
             }
             ids.push(id);
         }
+    }
+    if !converted_lonlat.is_empty() {
+        let names: Vec<&str> = converted_lonlat.iter().map(String::as_str).collect();
+        s.notify(rustgis_data::source::gdal::in_lonlat_notes(&names), false);
     }
     if empty_before {
         let e = ids.iter().filter_map(|id| s.map().layer(*id)).fold(rustgis_geom::Extent::EMPTY, |e, l| e.union(&l.extent()));
@@ -7699,6 +7780,59 @@ pub(crate) fn external_dataset_selector(command: &str) -> bool {
 mod tests {
     use crate::Session;
     use serde_json::json;
+
+    /// A payload can start beyond the sniff budget; only root keys decide the route.
+    #[test]
+    fn json_head_stops_before_payloads() {
+        for head in [
+            br#"{"type":"FeatureCollection","features":["#.as_slice(),
+            br#"{"metadata":{"type":"CityJSON","CityObjects":{}},"type":"FeatureCollection""#,
+        ] {
+            assert!(!super::json_city_model_head(head));
+        }
+        for head in [
+            br#"{"type":"CityJSON","CityObjects":{"#.as_slice(),
+            br#"{"CityObjects":{"#,
+            br#"{"features":["#,
+            br#"{"metadata":{"description":"unfinished"#,
+        ] {
+            assert!(super::json_city_model_head(head));
+        }
+    }
+
+    /// A CityJSON extension named features cannot decide the format before its root type.
+    #[test]
+    fn json_head_preserves_cityjson_extension_members() {
+        let text = r#"{"features":[],"type":"CityJSON","CityObjects":{},"version":"2.0","vertices":[]}"#;
+        assert!(rustgis_data::cityjson::looks_like_cityjson(text));
+        assert!(super::json_city_model_head(text.as_bytes()));
+        let large_extension = format!("{{\"features\":[\"{}", "x".repeat(64 << 10));
+        assert!(super::json_city_model_head(large_extension.as_bytes().get(..64 << 10).unwrap()));
+    }
+
+    /// Listing GeoJSON never reads its full payload merely to rule out a city model.
+    #[test]
+    fn listing_json_layers_only_reads_the_head() {
+        struct Dir(std::path::PathBuf);
+        impl Drop for Dir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Dir(std::env::temp_dir().join(format!("rustgis-json-head-{}", std::process::id())));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let path = dir.0.join("points.json");
+        let mut bytes = br#"{"type":"FeatureCollection","features":[]}"#.to_vec();
+        bytes.resize(128 << 10, b' ');
+        std::fs::write(&path, bytes).unwrap();
+        let capture = rustgis_data::provenance::Capture::start();
+        let mut s = crate::Session::new(Default::default());
+        let out = s.run("info.fileLayers", &serde_json::json!({"path":path})).unwrap();
+        assert_eq!(out["layers"], serde_json::json!(["points"]));
+        let inputs = capture.inputs();
+        assert_eq!(inputs.len(), 1);
+        assert!(inputs[0].sha256.is_none(), "a whole-file read was captured");
+    }
 
     /// Overlays left out for their pictures' size are said, with the budget; none, nothing said.
     #[test]

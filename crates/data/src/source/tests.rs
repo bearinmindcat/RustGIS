@@ -395,8 +395,9 @@ fn geopackage_provenance_excludes_temporary_copies() {
     write_gpkg(&path, true);
     let captured = crate::provenance::Capture::start();
     let bytes = crate::provenance::read(&path).unwrap();
-    assert!(gpkg::unsupported_table_counts_bytes(&bytes).unwrap().is_empty());
-    let source = open_bytes("upload.gpkg", bytes, None).unwrap();
+    let upload = gpkg::GpkgUpload::new(&bytes).unwrap();
+    assert!(upload.unsupported_table_counts().unwrap().is_empty());
+    let source = upload.open(None).unwrap();
     assert!(!source.read(&Request { extent: None, limit: 1 }).unwrap().features.is_empty());
     assert_eq!(captured.inputs().len(), 1);
     assert_eq!(captured.inputs()[0].path, path.display().to_string());
@@ -595,7 +596,7 @@ fn write_fgb(path: &Path) {
 }
 
 /// A GeoPackage of the points in Web Mercator, with an R-tree index (or without).
-fn write_gpkg(path: &Path, rtree: bool) {
+pub(super) fn write_gpkg(path: &Path, rtree: bool) {
     let _ = std::fs::remove_file(path);
     let c = rusqlite::Connection::open(path).unwrap();
     c.execute_batch(
@@ -3239,7 +3240,20 @@ fn a_csv_export_takes_x_and_y_in_a_system_asked_for() {
     }
     assert!(crate::io::to_csv_in(&every, lv95).unwrap().starts_with("x_1,y_1,"));
     let notes = crate::io::export_losses_notes_in(&every, "csv", None, "xy.csv", lv95).unwrap();
-    assert!(notes.iter().any(|n| n.contains("'x_1' and 'y_1'")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("'x', 'easting', 'y' and 'northing'") && n.contains("'x_1' and 'y_1'")), "{notes:?}");
+    // Each axis on its own: 'x' and 'easting' taken move only the x column, and only those two
+    // names are said.
+    let mut one =
+        Dataset::new("one", GeometryType::Point, vec![Field::new("x", FieldType::Integer), Field::new("easting", FieldType::Integer)]);
+    one.push(Some(Geometry::Point(Coord::new(2_600_000.0, 1_200_000.0))), vec![Value::Int(1), Value::Int(2)]);
+    one.crs = Some(lv95);
+    one.held_in = lv95;
+    assert!(crate::io::to_csv_in(&one, lv95).unwrap().starts_with("x_1,y,x,easting\n"));
+    let notes = crate::io::export_losses_notes_in(&one, "csv", None, "one.csv", lv95).unwrap();
+    assert!(
+        notes.iter().any(|n| n.contains("the names 'x' and 'easting', so") && n.contains("'x_1' and 'y'") && !n.contains("northing")),
+        "{notes:?}"
+    );
     // Into a geographic system other than WGS 84: longitude and latitude columns, and no note
     // of unusable positions, which are counted on the coordinates written.
     // Fields named x and y are a pair reading could take instead, which a note names when rows

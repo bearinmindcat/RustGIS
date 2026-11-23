@@ -72,7 +72,7 @@ A result is right, or RustGIS says what it lost or assumed
 - Known silent losses: DuckDB queries (`ST_Force2D`) drop Z without a notice; the OSM reader leaves out rings that don't close, rings and member ways with
   nodes or ways the file doesn't hold, and inner rings outside every outer one; and the text
   readers' losses listed as `Silent` in `crates/engine/tests/integration/never_silent_reading.rs`, among them
-  unreadable coordinates, holes and parts in KML, GeoRSS, MapInfo and
+  unreadable coordinates, holes and parts in MapInfo and
   DXF,
   and attribute fields/values in XLSB short-cell workbooks (the original SheetJS 0.18.5 clean
   workbook retains its point but no attributes, without a notice). A fix makes
@@ -85,13 +85,12 @@ A result is right, or RustGIS says what it lost or assumed
   FlatGeobuf, GeoParquet and FileGDB, Z/M-loss and non-UTF-8 text cases for Shapefile, and
   ring-loss cases for OSM PBF, separate Z- and M-loss cases for feature-service PBF, and WKT
   height/member losses for XLSX, ODS, XLS and XLSB, and
-  error-cell losses for XLSX; other loss kinds remain.
+  error-cell losses for XLSX and invalid-date losses for standalone DBF; other loss kinds remain.
   XLSM shares the XLSX parser; macros are untested.
   Exports are checked by `never_silent_roundtrip.rs` _(open)_.
-- Loss notices classified by code so scheduled jobs can detect them (the engine carries codes
-  through reader and tool results today; the remaining notices are to migrate). Then
-  `rustgis-cli run --strict`, which exits non-zero on a disallowed loss, and the codes exposed
-  to Python and MCP ([#2371](https://github.com/opengeos/RustGIS/issues/2371)).
+- The remaining loss notices classified by code (the engine carries codes through reader and
+  tool results today), so `rustgis-cli run --strict` stops at them, and the codes exposed to
+  Python and MCP ([#2371](https://github.com/opengeos/RustGIS/issues/2371)).
 - NTv2 grid shifts named in a file's own definition (a WKT or PROJ string that binds NAD27 to
   WGS 84 through a `.gsb` grid), which are said but not applied today (the grids PROJ's
   operations use are applied when present and downloaded on request). _Coordinate first_ (needs

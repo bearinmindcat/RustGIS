@@ -32,6 +32,53 @@ enum Expect {
 }
 use Expect::{Imported, Said, Silent};
 
+/// Independent dBASE III table: one text field and one date, with no encoding ambiguity.
+/// Only the date changes: a valid February day or a nonexistent one, read as Null.
+fn dbf_date(invalid: bool) -> Vec<u8> {
+    let mut bytes = vec![0u8; 97];
+    bytes[..12].copy_from_slice(&[3, 126, 11, 22, 1, 0, 0, 0, 97, 0, 13, 0]);
+    bytes[29] = 3; // Windows-1252 language driver; all text is ASCII.
+    for (at, name, kind, len) in [(32, "name", b'C', 4), (64, "day", b'D', 8)] {
+        bytes[at..at + name.len()].copy_from_slice(name.as_bytes());
+        bytes[at + 11] = kind;
+        bytes[at + 16] = len;
+    }
+    bytes[96] = 13;
+    bytes.extend_from_slice(b" kept");
+    bytes.extend_from_slice(if invalid { b"20260230" } else { b"20260228" });
+    bytes.push(26);
+    bytes
+}
+
+/// Checks the complete retained schema and row of the standalone date pair.
+fn check_dbf_date(ds: &rustgis_engine::data::Dataset, invalid: bool) -> std::io::Result<()> {
+    use rustgis_engine::data::{Field, FieldType, Value};
+    let date = if invalid { Value::Null } else { Value::parse_file("2026-02-28", FieldType::Date) };
+    if (!invalid && !matches!(&date, Value::Date(_)))
+        || ds.fields != [Field::new("name", FieldType::Text), Field::new("day", FieldType::Date)]
+        || ds.features.len() != 1
+        || ds.features[0].geometry.is_some()
+        || ds.features[0].attrs != [Value::Text("kept".into()), date]
+    {
+        return Err(std::io::Error::other(format!("standalone DBF date retained unexpected data: {ds:?}")));
+    }
+    Ok(())
+}
+
+/// The extra-cell pair preserves both named coordinates as integer attributes and point geometry.
+fn check_csv_extra(ds: &rustgis_engine::data::Dataset) -> std::io::Result<()> {
+    use rustgis_engine::data::{Field, FieldType, Geometry, Value};
+    use rustgis_engine::geom::Coord;
+    if ds.fields != [Field::new("lon", FieldType::Integer), Field::new("lat", FieldType::Integer)]
+        || ds.features.len() != 1
+        || ds.features[0].geometry != Some(Geometry::Point(Coord::new(1.0, 2.0)))
+        || ds.features[0].attrs != [Value::Int(1), Value::Int(2)]
+    {
+        return Err(std::io::Error::other(format!("CSV extra-cell pair retained unexpected data: {ds:?}")));
+    }
+    Ok(())
+}
+
 /// A clean file and the same file with a loss in it.
 struct Case {
     /// The reader and the loss, to name a failure.
@@ -43,10 +90,20 @@ struct Case {
     /// Files beside the clean and lossy inputs (binary indexes can differ).
     beside: [Vec<(&'static str, Vec<u8>)>; 2],
     expect: Expect,
+    /// Additional exact notices for this case's lossy input, in report order before its primary notice.
+    extra_notices: &'static [&'static str],
 }
 
 fn case(name: &'static str, file: &'static str, clean: impl AsRef<[u8]>, lossy: impl AsRef<[u8]>, expect: Expect) -> Case {
-    Case { name, file, clean: clean.as_ref().to_vec(), lossy: lossy.as_ref().to_vec(), beside: [Vec::new(), Vec::new()], expect }
+    Case {
+        name,
+        file,
+        clean: clean.as_ref().to_vec(),
+        lossy: lossy.as_ref().to_vec(),
+        beside: [Vec::new(), Vec::new()],
+        expect,
+        extra_notices: &[],
+    }
 }
 
 /// A GeoJSON feature collection of these geometries.
@@ -149,6 +206,10 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "<georss:where><gml:Polygon><gml:exterior><gml:LinearRing><gml:posList>0 0 0 4 4 4 0 0</gml:posList></gml:LinearRing></gml:exterior><gml:interior><gml:LinearRing><gml:posList>{hole}</gml:posList></gml:LinearRing></gml:interior></gml:Polygon></georss:where>"
         )
     };
+    let track = |coords: &[&str]| {
+        let body: String = coords.iter().map(|c| format!("<gx:coord>{c}</gx:coord>")).collect();
+        format!(r#"<gx:Track xmlns:gx="http://www.google.com/kml/ext/2.2">{body}</gx:Track>"#)
+    };
     let polyline =
         |middle: &str| format!("0 POLYLINE 8 0 66 1 70 0 0 VERTEX 8 0 10 0 20 0 0 VERTEX 8 0 {middle} 0 VERTEX 8 0 10 2 20 2 0 SEQEND");
     let parcel = r#"<Parcels><Parcel name="Lot"><CoordGeom><Line><Start>0 0</Start><End>0 10</End></Line><Line><Start>0 10</Start><End>10 10</End></Line><Line><Start>10 10</Start><End>0 0</End></Line></CoordGeom></Parcel></Parcels>"#;
@@ -215,7 +276,14 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "a.csv",
             "lon,lat\n1,2\n",
             "lon,lat\n1,2,lost\n",
-            Silent("a row's cells beyond the header's columns are left out"),
+            Imported("1 cell past the header's 2 columns was omitted in 1 row"),
+        ),
+        case(
+            "Standalone DBF: an invalid date",
+            "a.dbf",
+            dbf_date(false),
+            dbf_date(true),
+            Imported("a: 1 value isn't a date and was read as empty, in 'day'"),
         ),
         // KML.
         case(
@@ -237,15 +305,18 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "a.kml",
             kml(&["<LineString><coordinates>0,0 1,1 2,2</coordinates></LineString>"]),
             kml(&["<LineString><coordinates>0,0 x,1 2,2</coordinates></LineString>"]),
-            Silent("the coordinate is skipped and the line drawn without it"),
+            Imported("1 unreadable KML coordinate tuple was left out"),
         ),
-        case(
-            "KML: an unreadable hole",
-            "a.kml",
-            kml(&[&kml_polygon("1,1 2,1 2,2 1,1")]),
-            kml(&[&kml_polygon("1,1 x,y")]),
-            Silent("the hole is left out of the polygon"),
-        ),
+        Case {
+            extra_notices: &["a: 1 unreadable KML coordinate tuple was left out"],
+            ..case(
+                "KML: an unreadable hole",
+                "a.kml",
+                kml(&[&kml_polygon("1,1 2,1 2,2 1,1")]),
+                kml(&[&kml_polygon("1,1 x,y")]),
+                Imported("1 unreadable KML polygon hole was left out"),
+            )
+        },
         case(
             "KML: an unreadable part",
             "a.kml",
@@ -255,14 +326,39 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             kml(&[
                 "<MultiGeometry><Point><coordinates>1,1</coordinates></Point><LineString><coordinates>0,0</coordinates></LineString></MultiGeometry>",
             ]),
-            Silent("a line of one point is left out of the placemark"),
+            Imported("1 KML line part with fewer than two usable coordinates was left out"),
         ),
         case(
             "KML: a point with more than one coordinate",
             "a.kml",
             kml(&["<Point><coordinates>1,1</coordinates></Point>"]),
             kml(&["<Point><coordinates>1,1 2,2</coordinates></Point>"]),
-            Silent("only the first coordinate is kept"),
+            Imported("1 excess KML Point coordinate tuple was left out"),
+        ),
+        case(
+            "KML: a polygon without a usable outer ring",
+            "a.kml",
+            kml(&[
+                "<MultiGeometry><Point><coordinates>1,2</coordinates></Point><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 4,0 4,4</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>",
+            ]),
+            kml(&[
+                "<MultiGeometry><Point><coordinates>1,2</coordinates></Point><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0</coordinates></LinearRing></outerBoundaryIs></Polygon></MultiGeometry>",
+            ]),
+            Imported("1 KML polygon without a usable outer ring was left out"),
+        ),
+        case(
+            "KML: an unreadable gx:Track coordinate",
+            "a.kml",
+            kml(&[&track(&["0 0", "1 1", "2 2"])]),
+            kml(&[&track(&["0 0", "bad 1", "2 2"])]),
+            Imported("1 unreadable KML coordinate tuple was left out"),
+        ),
+        case(
+            "KML: a short gx:Track",
+            "a.kml",
+            kml(&[&format!("<MultiGeometry><Point><coordinates>1,2</coordinates></Point>{}</MultiGeometry>", track(&["0 0", "1 1"]))]),
+            kml(&[&format!("<MultiGeometry><Point><coordinates>1,2</coordinates></Point>{}</MultiGeometry>", track(&["0 0"]))]),
+            Imported("1 KML line part with fewer than two usable coordinates was left out"),
         ),
         // GPX.
         case(
@@ -270,7 +366,7 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "a.gpx",
             gpx(r#"<wpt lat="1" lon="1"/><wpt lat="2" lon="2"/>"#),
             gpx(r#"<wpt lat="1" lon="1"/><wpt lat="91" lon="2"/>"#),
-            Said("without usable coordinates"),
+            Said("without usable geometry"),
         ),
         case(
             "GPX: a track segment of one point",
@@ -279,7 +375,7 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
                 r#"<trk><trkseg><trkpt lat="1" lon="1"/><trkpt lat="2" lon="2"/></trkseg><trkseg><trkpt lat="3" lon="3"/><trkpt lat="4" lon="4"/></trkseg></trk>"#,
             ),
             gpx(r#"<trk><trkseg><trkpt lat="1" lon="1"/><trkpt lat="2" lon="2"/></trkseg><trkseg><trkpt lat="3" lon="3"/></trkseg></trk>"#),
-            Silent("the segment is left out of the track's line"),
+            Imported("1 GPX track segment with fewer than two usable points was left out of tracks; its point remains in track points"),
         ),
         // Feature-service PBF has a distinct sniffed parser from OSM PBF.
         case(
@@ -355,7 +451,7 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "a.rss",
             georss(&["<georss:point>45 -71</georss:point>"]),
             georss(&["<georss:point>45 -71 46 -72</georss:point>"]),
-            Silent("only the first pair is kept"),
+            Imported("1 excess GeoRSS Point coordinate pair was left out"),
         ),
         // DXF.
         case(
@@ -392,7 +488,7 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             "a.xml",
             landxml(&format!("{}{parcel}", cg_points("1 1"))),
             landxml(&format!(r#"{}<Parcels><Parcel name="Lot"/></Parcels>"#, cg_points("1 1"))),
-            Silent("the parcel is left out"),
+            Imported("1 LandXML parcel without CoordGeom was left out"),
         ),
         // Shapefile. 臺北101 as UTF-8, and in Big5, which isn't UTF-8.
         case(
@@ -519,6 +615,7 @@ fn cases(fixture_dir: &std::path::Path) -> Vec<Case> {
             lossy: rustgis_engine::data::zip::write(&[("doc.kml".into(), c.lossy.clone())]).unwrap(),
             beside: [Vec::new(), Vec::new()],
             expect: c.expect,
+            extra_notices: c.extra_notices,
         })
         .collect::<Vec<_>>();
     out.extend(kmz);
@@ -787,6 +884,24 @@ fn read(dir: &std::path::Path, file: &str, content: &[u8], beside: &[(&str, Vec<
             return Err(std::io::Error::other(format!("CSV collection retained data or notice differs: {native:?}, {report:?}")));
         }
     }
+    let csv_extra = file == "a.csv" && (content == b"lon,lat\n1,2\n" || content == b"lon,lat\n1,2,lost\n");
+    let extra_note = "1 cell past the header's 2 columns was omitted in 1 row";
+    let extra_messages = if content == b"lon,lat\n1,2,lost\n" { vec![extra_note] } else { vec![] };
+    let dbf = file == "a.dbf";
+    let dbf_invalid = dbf && content == dbf_date(true);
+    let dbf_messages = if dbf_invalid { vec!["a: 1 value isn't a date and was read as empty, in 'day'"] } else { vec![] };
+    if csv_extra || dbf {
+        let (native, report) = rustgis_engine::data::io::read_path(&path).map_err(std::io::Error::other)?;
+        if csv_extra {
+            check_csv_extra(&native)?;
+        } else {
+            check_dbf_date(&native, dbf_invalid)?;
+        }
+        let expected = if csv_extra { &extra_messages } else { &dbf_messages };
+        if report.skipped != 0 || &report.messages != expected {
+            return Err(std::io::Error::other(format!("tabular native report: {report:?}")));
+        }
+    }
     if file.ends_with(".shp") {
         let (native, report) =
             rustgis_engine::data::io::read_path(&path).map_err(|e| std::io::Error::other(format!("native Shapefile fixture: {e}")))?;
@@ -857,6 +972,23 @@ fn read(dir: &std::path::Path, file: &str, content: &[u8], beside: &[(&str, Vec<
     let mark = s.notice_mark();
     if let Err(e) = s.run("layer.addData", &json!({"path": path})) {
         return Ok(Err(e));
+    }
+    if csv_extra || dbf {
+        let expected = if csv_extra { &extra_messages } else { &dbf_messages };
+        if s.notices_since(mark).iter().map(|n| n.text.as_str()).collect::<Vec<_>>() != *expected {
+            return Err(std::io::Error::other(format!("tabular command notices: {:?}", s.notices_since(mark))));
+        }
+        if csv_extra {
+            if s.map().layers.len() != 1 || !s.project.tables.is_empty() {
+                return Err(std::io::Error::other("CSV extra-cell pair didn't add exactly one layer"));
+            }
+            check_csv_extra(&s.map().layers[0].dataset)?;
+        } else {
+            if !s.map().layers.is_empty() || s.project.tables.len() != 1 {
+                return Err(std::io::Error::other("DBF date pair didn't add exactly one standalone table"));
+            }
+            check_dbf_date(&s.project.tables[0].dataset, dbf_invalid)?;
+        }
     }
     if file.ends_with(".shp") {
         if s.map().layers.len() != 1 {
@@ -990,4 +1122,65 @@ fn a_reading_that_loses_something_says_so() {
     }
     let _ = std::fs::remove_dir_all(&root);
     assert!(failures.is_empty(), "{} of the cases failed:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// The pinned XML losses keep their native data and deliver exactly those notices at command ingress.
+#[test]
+fn xml_losses_keep_data_and_reach_command() {
+    use rustgis_engine::data::{Dataset, ReadReport, georss, gpx, kml, landxml};
+    let root = std::env::temp_dir().join(format!("rustgis-xml-loss-reading-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut checked = 0;
+    for c in cases(&root.join("fixtures")) {
+        let Imported(words) = c.expect else { continue };
+        if !["KML:", "GPX:", "GeoRSS:", "LandXML:"].iter().any(|prefix| c.name.starts_with(prefix)) {
+            continue;
+        }
+        checked += 1;
+        for (lossy, bytes) in [(false, &c.clean), (true, &c.lossy)] {
+            let native: Vec<(Dataset, ReadReport)> = match c.file {
+                "a.kml" | "a.kmz" => kml::read(c.file, bytes).unwrap().into_iter().map(|l| (l.dataset, l.report)).collect(),
+                "a.gpx" => gpx::read(c.file, bytes).unwrap(),
+                "a.rss" => georss::read(c.file, bytes).unwrap(),
+                "a.xml" => landxml::read(c.file, bytes, None).unwrap(),
+                other => panic!("unexpected XML fixture {other}"),
+            };
+            let messages: Vec<_> = native.iter().flat_map(|(_, r)| r.messages.iter().cloned()).collect();
+            let expected = if c.file.ends_with("kml") || c.file.ends_with("kmz") || c.file.ends_with("gpx") {
+                format!("a: {words}")
+            } else {
+                words.to_string()
+            };
+            let mut expected_messages = Vec::new();
+            if c.file == "a.xml" {
+                expected_messages.push(
+                    "the file doesn't say its coordinate system (give \"crs\", such as EPSG:2263): coordinates are kept as they are"
+                        .to_string(),
+                );
+            }
+            if lossy {
+                expected_messages.extend(c.extra_notices.iter().map(|m| (*m).to_string()));
+                expected_messages.push(expected);
+            }
+            assert_eq!(messages, expected_messages, "{} native notices", c.name);
+            let path = root.join(c.file);
+            std::fs::write(&path, bytes).unwrap();
+            let mut session = Session::new(Project::default());
+            let mark = session.notice_mark();
+            session.run("layer.addData", &json!({"path": path})).unwrap();
+            assert_eq!(session.map().layers.len(), native.len(), "{} layer count", c.name);
+            for (ds, _) in &native {
+                let mut matches = session.map().layers.iter().filter(|layer| layer.dataset.name == ds.name);
+                let layer = matches.next().unwrap_or_else(|| panic!("{} missing dataset {}", c.name, ds.name));
+                assert!(matches.next().is_none(), "{} repeated dataset {}", c.name, ds.name);
+                assert_eq!(layer.dataset.fields, ds.fields, "{} fields", c.name);
+                assert_eq!(layer.dataset.features, ds.features, "{} retained data", c.name);
+                assert_eq!(layer.dataset.held_in, ds.held_in, "{} held CRS", c.name);
+            }
+            let said: Vec<_> = session.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+            assert_eq!(said, messages, "{} command notices", c.name);
+        }
+    }
+    assert_eq!(checked, 17, "ten logical cases, seventeen rows with the KMZ twins");
+    let _ = std::fs::remove_dir_all(root);
 }

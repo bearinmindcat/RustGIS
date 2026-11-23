@@ -5,8 +5,14 @@ use crate::{Project, Session, sample};
 #[path = "tests/formats_out.rs"]
 mod formats_out;
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/held_databases.rs"]
+mod held_databases;
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "tests/scene_losses.rs"]
 mod scene_losses;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "tests/sources_own.rs"]
+mod sources_own;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "tests/said_not_silent.rs"]
@@ -419,36 +425,76 @@ fn shared_step_measures_the_layers_a_step_changes() {
     let mut s = world();
     let spec = *s.registry.get("map.zoomFull").unwrap();
     let (count, ds) = (s.map().layers.len(), s.map().layers[0].dataset.clone());
-    let quiet_layer = |s: &mut Session| -> crate::CmdResult {
+    let add_layer = |s: &mut Session| -> crate::CmdResult {
         crate::cmd::layer::add_dataset(s, ds);
         Ok(Value::Null)
     };
-    s.shared_step(&spec, quiet_layer).unwrap();
+    s.shared_step(&spec, add_layer).unwrap();
     assert_eq!((s.shared_steps.edited, s.map().layers.len()), (true, count + 1));
 }
 
+/// A command declared as not mutating that adds a layer, marks the project unsaved, makes an edit
+/// on the way and then fails: none of it excuses the layer it added.
+fn quiet_layer() -> crate::CommandSpec {
+    crate::CommandSpec::new("test.quietLayer", "Quiet layer", "Test", |s, _| {
+        let ds = s.map().layers[0].dataset.clone();
+        crate::cmd::layer::add_dataset(s, ds);
+        s.mark_unsaved();
+        s.guarded("Rename", true, |s| {
+            s.map_mut().name = "Renamed on the way".into();
+            Ok(Value::Null)
+        })?;
+        Err("failed after adding it".into())
+    })
+    .view()
+}
+
 /// A command declared as not mutating that adds, removes or reorders layers fails the tests
-/// (#2645), by itself or as a script's line; an edit it makes on the way, marking the project
-/// unsaved or failing afterwards doesn't excuse it. A layer's name, look or features aren't
-/// measured.
+/// (#2645). A layer's name, look or features aren't measured.
 #[test]
 #[should_panic(expected = "test.quietLayer doesn't mutate but changed the layers")]
 fn a_command_that_changes_layers_must_say_it_mutates() {
     let mut s = world();
-    s.registry.commands.push(
-        crate::CommandSpec::new("test.quietLayer", "Quiet layer", "Test", |s, _| {
-            let ds = s.map().layers[0].dataset.clone();
-            crate::cmd::layer::add_dataset(s, ds);
-            s.mark_unsaved();
-            s.guarded("Rename", true, |s| {
-                s.map_mut().name = "Renamed on the way".into();
-                Ok(Value::Null)
-            })?;
-            Err("failed after adding it".into())
-        })
-        .view(),
-    );
+    s.registry.commands.push(quiet_layer());
     let _ = s.run("test.quietLayer", &Value::Null);
+}
+
+/// The same as a task's step, whose panics the task catches: the check is raised when the command
+/// the user ran returns, not inside the step (#2696).
+#[test]
+#[should_panic(expected = "test.quietLayer doesn't mutate but changed the layers")]
+fn a_task_step_that_changes_layers_must_say_it_mutates() {
+    let mut s = world();
+    s.registry.commands.push(quiet_layer());
+    let steps = json!([{"title": "Quiet", "command": "test.quietLayer", "params": {}}]);
+    s.run("task.new", &json!({"name": "Quiet", "steps": steps})).unwrap();
+    let _ = s.run("task.run", &json!({"task": "Quiet"}));
+}
+
+/// And as a script's line (#2696).
+#[test]
+#[should_panic(expected = "test.quietLayer doesn't mutate but changed the layers")]
+fn a_script_line_that_changes_layers_must_say_it_mutates() {
+    let mut s = world();
+    s.registry.commands.push(quiet_layer());
+    let _ = s.run("script.run", &json!({"script": "test.quietLayer {}"}));
+}
+
+/// And as a line of a script an agent or the assistant runs, which doesn't go through
+/// `command_epilogue` (#2696).
+#[test]
+#[should_panic(expected = "test.quietLayer doesn't mutate but changed the layers")]
+fn a_scoped_script_line_that_changes_layers_must_say_it_mutates() {
+    struct Live;
+    impl crate::policy::Revocation for Live {
+        fn allows(&self, _: crate::policy::Effects) -> bool {
+            true
+        }
+    }
+    let mut s = world();
+    s.registry.commands.push(quiet_layer());
+    let scope = crate::policy::Scope::agent(crate::policy::AgentAccess::Full, true, "declared", None, std::sync::Arc::new(Live));
+    let _ = s.run_scoped(scope, &crate::policy::Call::script("test.quietLayer {}"));
 }
 
 /// A task's steps are counted as a script's lines: an undo step only when one edited (#2621).
@@ -598,6 +644,26 @@ fn scoped_table_writes_need_prepared_worker_results() {
     assert_eq!(s.undo_depth(), depth + 1);
     s.run("edit.undo", &Value::Null).unwrap();
     assert_eq!(serde_json::to_value(&s.project.tables).unwrap(), before);
+}
+
+#[test]
+fn losses_given_counts_what_the_notice_queue_no_longer_keeps() {
+    use rustgis_data::loss::LossCode;
+    let mut s = Session::new(Project::default());
+    s.notify_loss(LossCode::DroppedRing, String::from("a ring").into());
+    for i in 0..300 {
+        s.notify(format!("notice {i}"), false);
+    }
+    assert!(s.notices_since(0).iter().all(|n| n.loss().is_none()), "the loss notice left the queue");
+    assert_eq!(s.losses_given(), &[(LossCode::DroppedRing, 1)]);
+    // A loss a failed command reported is withdrawn with what it changed.
+    let failed = s.guarded("Lose then fail", true, |s| {
+        s.notify_loss(LossCode::DroppedRing, String::from("another ring").into());
+        s.notify_loss(LossCode::DroppedValue, String::from("a value").into());
+        Err("failed after the loss".into())
+    });
+    assert!(failed.is_err());
+    assert_eq!(s.losses_given(), &[(LossCode::DroppedRing, 1), (LossCode::DroppedValue, 0)]);
 }
 
 #[test]
@@ -2556,6 +2622,88 @@ fn an_image_marker_past_the_runs_budget_is_said_with_its_caps() {
     );
 }
 
+/// An SVG is a marker's image: `layer.marker` takes one, drawn at its proportions, as an undo
+/// step. One with filters, or with more to draw than a 2048 × 2048 image, is refused saying why,
+/// and changes nothing.
+#[test]
+fn layer_marker_takes_an_svg_and_refuses_one_it_cant_draw() {
+    use base64::Engine;
+    use rustgis_map::{Marker, Picture};
+    let svg = |body: &str| {
+        let text = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">{body}</svg>"#);
+        base64::engine::general_purpose::STANDARD.encode(text)
+    };
+    let mut s = world();
+    let marker = |s: &Session| s.map().layer_by_name("Cities").unwrap().symbol(0).marker;
+    let depth = s.undo_depth();
+    let blurred = svg(r#"<filter id="f"><feGaussianBlur stdDeviation="2"/></filter><rect width="40" height="20" filter="url(#f)"/>"#);
+    let piled = svg(&r##"<rect width="40" height="20" fill="#0a0" fill-opacity="0.5"/>"##.repeat(2000));
+    for (refused, why) in [
+        (
+            blurred,
+            "this one is an SVG with filters, text, images, animation or links to other files, which RustGIS doesn't draw in marker images",
+        ),
+        (piled, "this one is an SVG with more to draw than a 2048 × 2048 image"),
+    ] {
+        let e = s.run("layer.marker", &json!({"layer": "Cities", "image": refused})).unwrap_err();
+        assert!(e.to_string().ends_with(why), "{e}");
+        assert_eq!((marker(&s), s.undo_depth()), (Marker::Circle, depth));
+    }
+    let pin = svg(r##"<circle cx="10" cy="10" r="9" fill="#c00"/><rect x="22" y="2" width="16" height="16" fill="#00c"/>"##);
+    s.run("layer.marker", &json!({"layer": "Cities", "image": pin, "size": 20})).unwrap();
+    assert_eq!((marker(&s), s.undo_depth()), (Marker::Picture(Picture::new(&pin)), depth + 1));
+    assert_eq!(rustgis_render::picture_marker_kept_check(Picture::new(&pin)), Ok(0.5));
+}
+
+/// An SVG image marker that has too much to draw, or filters, is said with why on reading, apart
+/// from the others (the renderer's check stood in for).
+#[test]
+fn svg_image_markers_that_dont_draw_are_said_with_why() {
+    use rustgis_render::MarkerRefusal;
+    let mut s = world();
+    let picture = rustgis_map::Picture::new(&base64::Engine::encode(&base64::engine::general_purpose::STANDARD, "<svg/>"));
+    let [cities, rivers] = ["Cities", "Rivers"].map(|name| s.map().layer_by_name(name).unwrap().id);
+    for id in [cities, rivers] {
+        s.map_mut().layer_mut(id).unwrap().renderer.map_symbols(|sym| sym.marker = rustgis_map::Marker::Picture(picture));
+    }
+    let layers = [s.map().layer(cities).unwrap(), s.map().layer(rivers).unwrap()];
+    for (why, notice) in [
+        (
+            MarkerRefusal::TooMuchToDraw,
+            "Image markers in \"Cities\", \"Rivers\" are SVGs with more to draw than a 2048 × 2048 image and are drawn as circles",
+        ),
+        (
+            MarkerRefusal::SvgUndrawn,
+            "Image markers in \"Cities\", \"Rivers\" are SVGs with filters, text, images, animation or links to other files, which RustGIS doesn't draw in marker images, and are drawn as circles",
+        ),
+    ] {
+        let said: Vec<String> = crate::project::picture_notices_by(layers, [], &|_| Some(why)).iter().map(|n| n.english()).collect();
+        assert_eq!(said, [notice]);
+    }
+}
+
+/// Saved image markers that are SVGs open drawn, and one with a filter, which RustGIS doesn't draw,
+/// opens said and drawn as a circle, its image kept for saving (#2266 part E).
+#[test]
+fn an_svg_picture_marker_fixture_opens_drawn_or_said() {
+    let text = include_str!("../../../schema/fixtures/picture_markers_svg.rgis");
+    let mut s = Session::new(Project::default());
+    let mark = s.notice_mark();
+    s.run("project.openText", &json!({"text": text})).unwrap();
+    let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    let glows = "Image markers in \"Glows\" are SVGs with filters, text, images, animation or links to other files";
+    assert!(said.iter().any(|n| n.contains(glows)) && !said.iter().any(|n| n.contains("\"Pins\"")), "{said:?}");
+    let picture = |i: usize| match &s.project.styles[i].renderer {
+        rustgis_map::Renderer::Single(symbol) => match symbol.marker {
+            rustgis_map::Marker::Picture(p) => p,
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    assert!(rustgis_render::picture_marker_draws(picture(0)));
+    assert!(picture(1).base64().starts_with("PHN2Zy") && !rustgis_render::picture_marker_draws(picture(1)));
+}
+
 /// A saved image marker that is a GIF (which the desktop's decoder reads and the web's doesn't)
 /// opens said and drawn as a circle on every platform, its image kept for saving.
 #[test]
@@ -2565,7 +2713,7 @@ fn a_gif_picture_marker_fixture_opens_said_as_a_circle() {
     let mark = s.notice_mark();
     s.run("project.openText", &json!({"text": text})).unwrap();
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
-    assert!(said.iter().any(|n| n.contains("Image markers in \"Schools\" aren't PNG or JPEG images")), "{said:?}");
+    assert!(said.iter().any(|n| n.contains("Image markers in \"Schools\" aren't PNG, JPEG or SVG images")), "{said:?}");
     let rustgis_map::Renderer::Single(symbol) = &s.project.styles[0].renderer else { panic!("a single symbol") };
     let rustgis_map::Marker::Picture(picture) = symbol.marker else { panic!("an image marker") };
     assert!(picture.base64().starts_with("R0lGOD") && !rustgis_render::picture_marker_draws(picture));
@@ -2634,7 +2782,7 @@ fn an_image_is_a_marker_kept_in_the_project_file_that_an_older_reader_refuses() 
     let gif = gif_base64();
     for junk in ["bm90IGFuIGltYWdl", cut.as_str(), gif.as_str()] {
         let (_, said) = opened(saved_text.replace(&b64, junk));
-        assert!(said.iter().any(|n| n.contains("Image markers in \"Cities\" aren't PNG or JPEG images")), "{said:?}");
+        assert!(said.iter().any(|n| n.contains("Image markers in \"Cities\" aren't PNG, JPEG or SVG images")), "{said:?}");
         assert!(!said.iter().any(|n| n.contains("weren't kept")), "{said:?}");
     }
     // So does a map file or a layer file added on its own.
@@ -2702,10 +2850,10 @@ fn an_image_is_a_marker_kept_in_the_project_file_that_an_older_reader_refuses() 
     }
     let depth = s.undo_depth();
     for (bad, says) in [
-        (json!({"layer": "Cities", "image": 7}), "PNG or JPEG image as base64"),
-        (json!({"layer": "Cities", "image": "bm90IGFuIGltYWdl"}), "PNG or JPEG image as base64"),
-        (json!({"layer": "Cities", "image": "%%%"}), "PNG or JPEG image as base64"),
-        (json!({"layer": "Cities", "image": gif_base64()}), "PNG or JPEG image as base64"),
+        (json!({"layer": "Cities", "image": 7}), "PNG, JPEG or SVG image as base64"),
+        (json!({"layer": "Cities", "image": "bm90IGFuIGltYWdl"}), "PNG, JPEG or SVG image as base64"),
+        (json!({"layer": "Cities", "image": "%%%"}), "PNG, JPEG or SVG image as base64"),
+        (json!({"layer": "Cities", "image": gif_base64()}), "PNG, JPEG or SVG image as base64"),
         (json!({"layer": "Cities", "image": ""}), "image is empty"),
         (json!({"layer": "Cities", "image": " ", "shape": "star"}), "image is empty"),
         (json!({"layer": "Cities", "image": "", "shape": "star", "char": "x"}), "image is empty"),
@@ -2769,12 +2917,12 @@ fn an_image_marks_a_line_a_point_and_a_dot_fill() {
     let _ = Picture::new("bm90IGFuIGltYWdlIGVpdGhlcg==");
     let too_long = "A".repeat(rustgis_map::symbology::MAX_PICTURE_BYTES + 4);
     for (layer, markers, says) in [
-        ("Rivers", json!({"image": 7}), "PNG or JPEG image as base64"),
-        ("Rivers", json!({"image": junk}), "PNG or JPEG image as base64"),
-        ("Rivers", json!({"image": gif_base64()}), "PNG or JPEG image as base64"),
+        ("Rivers", json!({"image": 7}), "PNG, JPEG or SVG image as base64"),
+        ("Rivers", json!({"image": junk}), "PNG, JPEG or SVG image as base64"),
+        ("Rivers", json!({"image": gif_base64()}), "PNG, JPEG or SVG image as base64"),
         ("Rivers", json!({"image": ""}), "image is empty"),
         ("Rivers", json!({"mark": "circle", "image": ""}), "image is empty"),
-        ("Rivers", json!({"image": "bm90IGFuIGltYWdlIGVpdGhlcg=="}), "PNG or JPEG image as base64"),
+        ("Rivers", json!({"image": "bm90IGFuIGltYWdlIGVpdGhlcg=="}), "PNG, JPEG or SVG image as base64"),
         ("Rivers", json!({"image": too_long}), "at most 2 MiB"),
         ("Rivers", json!({"mark": "image"}), "needs its image"),
         ("Rivers", json!({"mark": "circle", "image": unkept}), "only one"),
@@ -2786,9 +2934,9 @@ fn an_image_marks_a_line_a_point_and_a_dot_fill() {
         assert!(err.contains(says), "{err}");
     }
     for (layer, fill, says) in [
-        ("Countries", json!({"pattern": "dots", "image": 7}), "PNG or JPEG image as base64"),
-        ("Countries", json!({"pattern": "dots", "image": junk}), "PNG or JPEG image as base64"),
-        ("Countries", json!({"pattern": "dots", "image": gif_base64()}), "PNG or JPEG image as base64"),
+        ("Countries", json!({"pattern": "dots", "image": 7}), "PNG, JPEG or SVG image as base64"),
+        ("Countries", json!({"pattern": "dots", "image": junk}), "PNG, JPEG or SVG image as base64"),
+        ("Countries", json!({"pattern": "dots", "image": gif_base64()}), "PNG, JPEG or SVG image as base64"),
         ("Countries", json!({"pattern": "dots", "marker": "star", "image": ""}), "image is empty"),
         ("Countries", json!({"pattern": "hatch", "image": " "}), "image is empty"),
         ("Countries", json!({"pattern": "dots", "image": too_long}), "at most 2 MiB"),
@@ -3504,7 +3652,7 @@ fn qgis_annotation_layers_import_as_graphics_layers() {
 }
 
 /// A QGIS style's raster image markers draw their PNG or JPEG file, read from the style's folder;
-/// one that isn't a PNG or JPEG, doesn't open or is past what a marker keeps is a circle, noted.
+/// one that isn't a PNG, JPEG or SVG, doesn't open or is past what a marker keeps is a circle, noted.
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
@@ -3525,6 +3673,12 @@ fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
     image.save(dir.join("pins/pin.png")).unwrap();
     image.save(dir.join("pins/pin.jpg")).unwrap();
     image.save(dir.join("pins/pin.gif")).unwrap();
+    // An SVG goes through the same check as `layer.marker`, so it draws too.
+    std::fs::write(
+        dir.join("pins/pin.svg"),
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 4"><rect width="8" height="4" fill="#c81e1e"/></svg>"##,
+    )
+    .unwrap();
     // Past the 2 MiB of base64 a marker keeps (1.5 MiB of file); its start a PNG's.
     let mut big = std::fs::read(dir.join("pins/pin.png")).unwrap();
     big.resize(1600 << 10, 0);
@@ -3542,7 +3696,7 @@ fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
         |r: &serde_json::Value| r["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
     let mut s = world();
     let marker = |s: &Session| s.map().layer_by_name("Cities").unwrap().symbol(0).marker;
-    for file in ["./pins/pin.png", "pins/pin.jpg"] {
+    for file in ["./pins/pin.png", "pins/pin.jpg", "pins/pin.svg"] {
         let path = dir.join("pins.qml");
         std::fs::write(&path, qml(file)).unwrap();
         let r = s.run("style.importQgis", &json!({"layer": "Cities", "path": path.to_string_lossy()})).unwrap();
@@ -3551,7 +3705,7 @@ fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
         assert!(notes(&r).is_empty(), "{file}: {:?}", notes(&r));
     }
     for (file, note) in [
-        ("pins/pin.gif", "raster image markers whose image isn't a PNG or JPEG RustGIS reads, drawn as circles"),
+        ("pins/pin.gif", "raster image markers whose image isn't a PNG, JPEG or SVG RustGIS reads, drawn as circles"),
         ("pins/gone.png", "raster image markers whose image file doesn't open, drawn as circles"),
         ("pins/big.png", "raster image markers whose image is past 2 MiB of base64, drawn as circles"),
         ("pins/many.png", "raster image markers whose image has more pixels than 2048 × 2048, drawn as circles"),
@@ -3567,7 +3721,7 @@ fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
     let path = dir.join("pins.qml");
     std::fs::write(&path, qml("pins/empty.png")).unwrap();
     let r = s.run("style.importQgis", &json!({"layer": "Cities", "path": path.to_string_lossy()})).unwrap();
-    assert_eq!(notes(&r), ["raster image markers whose image isn't a PNG or JPEG RustGIS reads, drawn as circles"]);
+    assert_eq!(notes(&r), ["raster image markers whose image isn't a PNG, JPEG or SVG RustGIS reads, drawn as circles"]);
     // A named pipe isn't opened: opening one waits for a writer, which would hold the import.
     #[cfg(unix)]
     if std::process::Command::new("mkfifo").arg(dir.join("pins/pipe.png")).status().is_ok_and(|s| s.success()) {
@@ -3605,7 +3759,7 @@ fn qgis_raster_image_markers_read_their_files_from_the_style_folder() {
         said,
         [
             ("raster image markers past the bytes of images an import reads, drawn as circles".to_string(), 1),
-            ("raster image markers whose image isn't a PNG or JPEG RustGIS reads, drawn as circles".to_string(), 2),
+            ("raster image markers whose image isn't a PNG, JPEG or SVG RustGIS reads, drawn as circles".to_string(), 2),
         ]
     );
     // A file past what a marker keeps is charged for what was read of it: two take the budget.
@@ -9276,6 +9430,7 @@ fn opening_projects_reports_moved_label_and_callout_adjustments() {
         generation: String::new(),
         returned: Vec::new(),
         ids: Default::default(),
+        conflicts: Default::default(),
         data: project.maps[0].clone(),
     });
     let clean = serde_json::to_string(&project).unwrap();
@@ -14648,6 +14803,67 @@ fn a_publications_colorbar_keeps_its_own_height_beside_rows() {
     assert_eq!(colorbar_fit(75.0, 56.0, 22.0, false), 56.0);
 }
 
+/// A layout frame centred on a pole keeps that centre through `layout.import` and
+/// `layout.update`, and says nothing on a polar map, where it's drawn there; on Web Mercator,
+/// which can't show a pole, it says the frame is drawn at 85° (#2684).
+#[test]
+fn a_layout_frame_centred_on_a_pole_is_kept_and_said_where_it_cant_be_shown() {
+    use rustgis_map::layout::ElementKind;
+    // The issue's layout: one round frame on the South Pole.
+    let layout = r#"{"name":"Polo","width":150,"height":150,"elements":[{"id":1,"name":"Mapa","x":5,"y":5,"w":140,"h":140,"visible":true,
+ "kind":{"MapFrame":{"map":"Mapa","center":{"x":0.0,"y":-90.0},"scale":60000000.0,"shape":"Circle",
+ "grid":{"step":10.0,"color":[0,0,0,255],"labels":false,"kind":"graticule","short":false},"extent_of":null}}}],
+ "series":null,"next_id":2}"#;
+    for (projection, said) in [(Some("EPSG:3031"), false), (None, true)] {
+        let mut s = Session::new(Project::default());
+        s.run("map.new", &json!({"name": "Mapa"})).unwrap();
+        if let Some(p) = projection {
+            s.run("map.projection", &json!({"type": p})).unwrap();
+        }
+        let center = |s: &Session| match s.project.layouts.last().map(|l| &l.elements[0].kind) {
+            Some(ElementKind::MapFrame { center, .. }) => center.y,
+            _ => panic!("no frame"),
+        };
+        let told = |s: &Session, mark| {
+            s.notices_since(mark).iter().filter(|n| n.text.contains("can't show") && n.text.contains("'Mapa' at latitude -85")).count() == 1
+        };
+        let mark = s.notice_mark();
+        s.run("layout.import", &json!({"text": layout})).unwrap();
+        assert_eq!(center(&s), -90.0, "{projection:?}: imported");
+        assert_eq!(told(&s, mark), said, "{projection:?}: {:?}", s.notices_since(mark));
+        // Moved away, then back onto the pole by its properties: each command says only its own.
+        let mark = s.notice_mark();
+        s.run("layout.update", &json!({"element": 1, "center": [0, -60]})).unwrap();
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("can't show")), "{:?}", s.notices_since(mark));
+        let mark = s.notice_mark();
+        s.run("layout.update", &json!({"element": 1, "center": [0, -90]})).unwrap();
+        assert_eq!(center(&s), -90.0, "{projection:?}: updated");
+        assert_eq!(told(&s, mark), said, "{projection:?}: {:?}", s.notices_since(mark));
+        // A longitude past ±180° isn't a centre the projection can't show.
+        let mark = s.notice_mark();
+        s.run("layout.update", &json!({"element": 1, "center": [300, -60]})).unwrap();
+        assert!(!s.notices_since(mark).iter().any(|n| n.text.contains("can't show")), "{:?}", s.notices_since(mark));
+    }
+    // Two pole frames in one layout on Web Mercator: one notice, counting both.
+    let mut s = Session::new(Project::default());
+    s.run("map.new", &json!({"name": "Mapa"})).unwrap();
+    let mut two: Value = serde_json::from_str(layout).unwrap();
+    let mut second = two["elements"][0].clone();
+    second["id"] = json!(2);
+    second["name"] = json!("Norte");
+    second["kind"]["MapFrame"]["center"]["y"] = json!(90.0);
+    two["elements"].as_array_mut().unwrap().push(second);
+    two["next_id"] = json!(3);
+    let mark = s.notice_mark();
+    s.run("layout.import", &json!({"text": two.to_string()})).unwrap();
+    let said: Vec<_> = s.notices_since(mark).iter().filter(|n| n.text.contains("can't show")).map(|n| n.text.clone()).collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert!(
+        said[0].contains("2 map frame(s)") && said[0].contains("'Mapa' at latitude -85") && said[0].contains("'Norte' at latitude 85"),
+        "{said:?}"
+    );
+}
+
 /// Series page labels and dynamic text share the row-number fallback for null and blank names.
 #[test]
 fn map_series_empty_names_use_row_numbers() {
@@ -17641,6 +17857,7 @@ fn exporting_a_raster_as_a_cog() {
 /// Mensuration measures the Earth on the WGS 84 ellipsoid, as the Measure tool does, so the same
 /// points give the same numbers in both; another body keeps its sphere (#2568).
 #[test]
+#[expect(clippy::disallowed_methods, reason = "the test tells the ellipsoid's area from the sphere's")]
 fn mensuration_measures_the_earth_on_the_ellipsoid() {
     use rustgis_geom::Coord;
     let mut s = world();
@@ -18175,6 +18392,92 @@ fn offline_sync_field_added_on_both_sides_is_compared() {
     assert_eq!(done["conflicts"].as_u64(), Some(1), "{done}");
     let said: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
     assert!(said.iter().any(|t| t.contains("replaced the map's changes") && t.contains("Assets #")), "{said:?}");
+    // The office's value, which the crew's replaced, is kept on the area.
+    let listed = s.run("offline.conflicts", &json!({"name": "Fieldwork"})).unwrap();
+    let list = listed["conflicts"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{listed}");
+    assert_eq!(
+        (&list[0]["kind"], &list[0]["values"], &list[0]["package"]),
+        (&json!("replaced"), &json!({"notes": "office"}), &json!("")),
+        "{listed}"
+    );
+    assert!(list[0].get("geometry").is_none(), "the shape didn't change: {listed}");
+}
+
+/// An offline edit to a feature deleted from the source meanwhile is dropped, and the area keeps
+/// what the edit changed as the version that lost.
+#[test]
+fn offline_sync_keeps_an_edit_dropped_for_a_deletion() {
+    let mut s = offline_field_session(&["Assets"], false);
+    s.run("edit.setValue", &json!({"layer": "Assets", "row": 0, "field": "name", "value": "crew"})).unwrap();
+    s.run("map.activate", &json!({"name": "Map"})).unwrap();
+    s.run("select.rows", &json!({"layer": "Assets", "rows": [0]})).unwrap();
+    s.run("edit.delete", &Value::Null).unwrap();
+    let done = s.run("offline.sync", &json!({"name": "Fieldwork"})).unwrap();
+    assert_eq!(done["skipped"].as_u64(), Some(1), "{done}");
+    let listed = s.run("offline.conflicts", &json!({"name": "Fieldwork"})).unwrap();
+    let list = listed["conflicts"].as_array().unwrap();
+    assert_eq!(list.len(), 1, "{listed}");
+    assert_eq!(list[0]["kind"], "dropped", "{listed}");
+    // Only what the area changed: its name, not its other values or its unmoved shape.
+    assert_eq!(list[0]["values"], json!({"name": "crew"}), "{listed}");
+    assert!(list[0].get("geometry").is_none(), "{listed}");
+    // A sync with nothing in conflict keeps nothing more.
+    s.run("offline.sync", &json!({"name": "Fieldwork"})).unwrap();
+    assert_eq!(s.project.offline_areas[0].conflicts.len(), 1);
+}
+
+/// A kept conflict's value that isn't a finite number is saved as null and counted, as a layer's
+/// is; a shape that lost with such a coordinate refuses the save, naming the conflict, and a clean
+/// list says nothing.
+#[test]
+fn saving_kept_conflicts_counts_numbers_written_as_null_and_refuses_bad_shapes() {
+    use crate::project::ConflictKind;
+    let dir = std::env::temp_dir().join(format!("rustgis-conflict-save-{}-{}", std::process::id(), crate::project::field_id().unwrap()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("p.rgis");
+    let mut s = offline_field_session(&["Assets"], false);
+    let kept = |values, geometry| {
+        let mut c = crate::cmd::workspace::conflict("", 1, "Assets", 1, ConflictKind::Dropped, values, Some(geometry));
+        c.at = 1.0;
+        c
+    };
+    let said = |s: &mut Session| {
+        let mark = s.notice_mark();
+        let done = s.run("project.saveAs", &json!({"path": path}));
+        (done, s.notices_since(mark).iter().map(|n| n.text.clone()).collect::<Vec<_>>())
+    };
+    let point = |x: f64| Some(rustgis_data::Geometry::Point(rustgis_geom::Coord::new(x, 1.0)));
+    s.project.offline_areas[0].conflicts = vec![kept(vec![("population".into(), rustgis_data::Value::Int(10))], point(1.0)).into()];
+    let (done, notices) = said(&mut s);
+    assert!(done.is_ok() && notices.iter().all(|n| !n.contains("written as null")), "{notices:?}");
+    let mark = s.notice_mark();
+    s.run("offline.conflicts", &json!({"name": "Fieldwork"})).unwrap();
+    assert!(s.notices_since(mark).iter().all(|n| !n.text.contains("listed as null")), "a clean list says nothing");
+    s.project.offline_areas[0].conflicts.push(kept(vec![("population".into(), rustgis_data::Value::Float(f64::NAN))], point(1.0)).into());
+    let (done, notices) = said(&mut s);
+    assert!(done.is_ok(), "{done:?}");
+    assert!(
+        notices.iter().any(|n| n.contains("1 attribute value(s)") && n.contains("offline area 'Fieldwork''s conflicts")),
+        "{notices:?}"
+    );
+    let before = std::fs::read(&path).unwrap();
+    s.project.offline_areas[0].conflicts.push(kept(Vec::new(), point(f64::NAN)).into());
+    // Listed, the value and the shape are null, and said.
+    let mark = s.notice_mark();
+    let listed = s.run("offline.conflicts", &json!({"name": "Fieldwork"})).unwrap();
+    assert_eq!(
+        (&listed["conflicts"][1]["values"]["population"], &listed["conflicts"][2]["geometry"]),
+        (&Value::Null, &Value::Null),
+        "{listed}"
+    );
+    let listing: Vec<String> = s.notices_since(mark).iter().map(|n| n.text.clone()).collect();
+    assert!(listing.iter().any(|n| n.contains("Offline area 'Fieldwork': 2 kept value(s) or shape(s)")), "{listing:?}");
+    let (done, _) = said(&mut s);
+    let e = done.unwrap_err();
+    assert!(e.contains("offline area 'Fieldwork'") && e.contains("Assets #1") && e.contains("dismiss it first"), "{e}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "the file is kept as it was");
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -22084,6 +22387,7 @@ fn split_sources_keep_their_points_on_top() {
             layer: layer.to_string(),
             family: Some(f),
             unprojected: false,
+            in_lonlat: false,
         })
         .collect();
     let original = dir.join("file.gpx").display().to_string();
@@ -25413,8 +25717,9 @@ fn a_service_download_is_added_with_the_drawing_info_given() {
 }
 
 /// An ArcGIS service's picture markers draw their images, checked as `layer.marker` checks one:
-/// a PNG class draws it and the project then asks for picture markers; a GIF class, which the
-/// renderer refuses, is a circle in a ramp's colour, said (#2266 part C).
+/// a PNG class draws it and the project then asks for picture markers, and so does an SVG class
+/// (#2266 part E); a GIF class, which the renderer refuses, is a circle in a ramp's colour, said
+/// (#2266 part C).
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn an_arcgis_services_picture_markers_draw_their_images() {
@@ -25425,12 +25730,16 @@ fn an_arcgis_services_picture_markers_draw_their_images() {
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
         .unwrap();
     let (png, gif) = (base64::engine::general_purpose::STANDARD.encode(&png), gif_base64());
+    let svg = base64::engine::general_purpose::STANDARD
+        .encode(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 6 4"><rect width="6" height="4" fill="#0078c8"/></svg>"##);
     let picture = |b64: &str| json!({"type": "esriPMS", "imageData": b64, "contentType": "image/png", "width": 12, "height": 8});
     let drawing = json!({"renderer": {"type": "uniqueValue", "field1": "KIND", "uniqueValueInfos": [
-        {"value": "school", "symbol": picture(&png)}, {"value": "stop", "symbol": picture(&gif)}]}});
+        {"value": "school", "symbol": picture(&png)}, {"value": "stop", "symbol": picture(&gif)},
+        {"value": "park", "symbol": picture(&svg)}]}});
     let answer = r#"{"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": {"KIND": "school"}, "geometry": {"type": "Point", "coordinates": [0, 0]}},
-        {"type": "Feature", "properties": {"KIND": "stop"}, "geometry": {"type": "Point", "coordinates": [1, 1]}}]}"#;
+        {"type": "Feature", "properties": {"KIND": "stop"}, "geometry": {"type": "Point", "coordinates": [1, 1]}},
+        {"type": "Feature", "properties": {"KIND": "park"}, "geometry": {"type": "Point", "coordinates": [2, 2]}}]}"#;
     let mut s = Session::new(Project::default());
     let id = s.download_started();
     assert!(s.download_landed(id, answer.as_bytes().to_vec()));
@@ -25438,12 +25747,12 @@ fn an_arcgis_services_picture_markers_draw_their_images() {
     s.run("layer.addDownload", &json!({"id": id, "url": url, "name": "Places", "service": true, "drawingInfo": drawing})).unwrap();
     let places = s.map().layer_by_name("Places").unwrap();
     let rustgis_map::Renderer::Unique { classes, .. } = &places.renderer else { panic!("{:?}", places.renderer) };
-    let [(_, school), (_, stop)] = classes.as_slice() else { panic!("{classes:?}") };
+    let [(_, school), (_, stop), (_, park)] = classes.as_slice() else { panic!("{classes:?}") };
     assert!(matches!(school.marker, Marker::Picture(p) if p.base64() == png), "{school:?}");
+    assert!(matches!(park.marker, Marker::Picture(p) if p.base64() == svg && rustgis_render::picture_marker_draws(p)), "{park:?}");
     assert_eq!((school.size, stop.marker), (12.0, Marker::Circle));
     let texts: Vec<_> = s.notices.iter().map(|n| n.text.as_str()).collect();
-    let said =
-        "Places: the service's symbology came in, except: picture markers whose image isn't a PNG or JPEG RustGIS reads, drawn as circles";
+    let said = "Places: the service's symbology came in, except: picture markers whose image isn't a PNG, JPEG or SVG RustGIS reads, drawn as circles";
     assert!(texts.contains(&said), "{texts:?}");
     assert_eq!(serde_json::to_value(&s.project).unwrap()["requires"], json!(["picture-markers"]));
 }
@@ -26151,6 +26460,18 @@ fn geopackage_omission_counts_match_unregistered_tables_with_bounded_kinds() {
         "{}",
         notice.text
     );
+    let bytes = std::sync::Arc::new(std::fs::read(&path).unwrap());
+    for stream in [false, true] {
+        for selected in [false, true] {
+            let mut uploaded = Session::new(Project::default());
+            let params = json!({"stream": stream, "layer": selected.then_some("A")});
+            crate::cmd::layer::add_source(&mut uploaded, &params, crate::cmd::layer::Origin::Bytes("kinds.gpkg", bytes.clone()), None)
+                .unwrap();
+            assert_eq!(uploaded.map().layers.len(), 1);
+            let notes: Vec<_> = uploaded.notices.iter().filter(|n| n.text.contains("the first of 2 feature tables")).collect();
+            assert_eq!(notes.len(), usize::from(!selected), "stream={stream}, selected={selected}");
+        }
+    }
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -41944,6 +42265,7 @@ fn scripts_refuse_edits_to_streamed_layers() {
 /// A map on Mars (#223): the body switcher puts a Mars basemap under it, its measurements and
 /// scale are Mars', and the project keeps the body; back on the Earth the Mars basemap goes.
 #[test]
+#[expect(clippy::disallowed_methods, reason = "another body measures on its sphere")]
 fn celestial_bodies_set_the_basemap_and_the_measurements() {
     let mut s = Session::new(Project::default());
     let earth = |s: &mut Session| {
@@ -44220,7 +44542,9 @@ fn geopackage_edits_save_back() {
     {
         let r2 = row_of(&s, 2);
         let l = s.map_mut().layer_mut(id).unwrap();
-        l.dataset.features[r2].geometry = Some(Geometry::Line(vec![moved.clone()]));
+        // The layer holds the table's own Web Mercator coordinates.
+        assert_eq!(l.dataset.coord_crs(), Crs::from_epsg(3857).unwrap());
+        l.dataset.features[r2].geometry = Some(Geometry::Line(vec![moved.iter().copied().map(rustgis_geom::lonlat_to_merc).collect()]));
         l.touch_geometry();
     }
     let r3 = row_of(&s, 3);
@@ -53958,6 +54282,7 @@ fn opening_a_diagram_that_wont_show_says_why() {
         generation: String::new(),
         returned: Vec::new(),
         ids: Default::default(),
+        conflicts: Default::default(),
         data: snapshot,
     });
     let mut reread = Session::new(Project::from_json(&serde_json::to_string(&offline.project).unwrap()).unwrap());
